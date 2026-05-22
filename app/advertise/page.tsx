@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
+import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import Billboard from '@/components/Billboard'
 import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
@@ -21,6 +23,8 @@ const ZOOM_LEVELS = [1, 1.5, 2, 3, 4, 6, 8] as const
 type ZoomLevel = (typeof ZOOM_LEVELS)[number]
 
 export default function AdvertisePage() {
+  const { publicKey } = useWallet()
+  const { setVisible: openWalletModal } = useWalletModal()
   const [authState, setAuthState] = useState<AuthState>('idle')
   const [email, setEmail] = useState('')
   const [balance, setBalance] = useState<number | null>(null)
@@ -184,6 +188,21 @@ export default function AdvertisePage() {
     loadBalance()
     loadSettings()
   }, [loadTiles, loadBalance, loadSettings])
+
+  // Auto-save connected wallet address to advertiser account
+  useEffect(() => {
+    if (!publicKey || authState !== 'logged_in') return
+    const addr = publicKey.toBase58()
+    if (addr === walletAddress) return
+    fetch('/api/user/wallet', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ walletAddress: addr }),
+    })
+      .then((r) => r.json())
+      .then((d) => { if (d.ok) setWalletAddress(addr) })
+      .catch(() => {})
+  }, [publicKey, authState, walletAddress])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -442,33 +461,45 @@ export default function AdvertisePage() {
         {showTopup && (
           <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-4 bg-white/2 space-y-4">
 
-            {/* Wallet address */}
-            <form onSubmit={handleSaveWallet} className="space-y-2">
-              <label className="block text-xs text-white/50 uppercase tracking-widest">
-                Your Solana wallet address
-              </label>
-              <div className="flex gap-2">
-                <input
-                  value={walletInput}
-                  onChange={(e) => setWalletInput(e.target.value)}
-                  placeholder="Paste your Solana address (base58)"
-                  className="flex-1 bg-white/5 border border-white/10 rounded px-3 py-1.5 text-white text-xs font-mono focus:outline-none focus:border-green-400 placeholder-white/20"
-                />
-                <button
-                  type="submit"
-                  disabled={savingWallet || walletInput.trim() === walletAddress}
-                  className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded transition-colors disabled:opacity-40"
-                >
-                  {savingWallet ? '…' : 'Save'}
-                </button>
+            {/* Wallet — connected wallet is primary, manual paste is fallback */}
+            {publicKey ? (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                <span className="text-green-400 font-mono font-bold">{publicKey.toBase58().slice(0,6)}…{publicKey.toBase58().slice(-4)}</span>
+                <span className="text-white/30">wallet connected</span>
               </div>
-              {walletAddress && (
-                <p className="text-green-400/70 text-[10px]">Saved: {walletAddress}</p>
-              )}
-            </form>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-white/50 text-xs">Connect wallet to top up with USDC.</p>
+                <button
+                  onClick={() => openWalletModal(true)}
+                  className="text-xs bg-green-400 hover:bg-green-300 text-black font-bold px-4 py-1.5 rounded transition-colors"
+                >
+                  Connect Wallet
+                </button>
+                {/* Dev fallback: manual paste */}
+                {process.env.NODE_ENV !== 'production' && (
+                  <form onSubmit={handleSaveWallet} className="flex gap-2 pt-1 border-t border-white/5">
+                    <input
+                      value={walletInput}
+                      onChange={(e) => setWalletInput(e.target.value)}
+                      placeholder="Dev: paste address manually"
+                      className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-[10px] font-mono focus:outline-none focus:border-green-400 placeholder-white/20"
+                    />
+                    <button
+                      type="submit"
+                      disabled={savingWallet || walletInput.trim() === walletAddress}
+                      className="text-[10px] bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded transition-colors disabled:opacity-40"
+                    >
+                      {savingWallet ? '…' : 'Save'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
 
             {/* Deposit instructions */}
-            {walletAddress && !pendingDeposit && (
+            {(publicKey ? publicKey.toBase58() === walletAddress && walletAddress : walletAddress) && !pendingDeposit && (
               <div>
                 <p className="text-xs text-white/50 mb-2">
                   Send USDC (SPL) from your saved wallet to our deposit address. We&apos;ll credit your

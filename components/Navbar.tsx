@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import WalletButton from './WalletButton'
 
 const links = [
   { href: '/', label: 'Board' },
@@ -37,16 +38,7 @@ export default function Navbar() {
               {label}
             </Link>
           ))}
-          <Link
-            href="/admin"
-            className={`ml-2 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-              path === '/admin'
-                ? 'bg-amber-500/20 text-amber-400'
-                : 'text-white/30 hover:text-amber-400'
-            }`}
-          >
-            Admin
-          </Link>
+          <WalletButton />
         </div>
       </div>
     </nav>

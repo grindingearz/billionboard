@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import Navbar from '@/components/Navbar'
+import WalletProvider from '@/components/WalletProvider'
 
 export const metadata: Metadata = {
   title: 'BillionBoard — 1 Billion Pixel Internet Billboard',
@@ -17,8 +18,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="h-full">
       <body className="min-h-full bg-black text-white antialiased">
-        <Navbar />
-        <main className="pt-14">{children}</main>
+        <WalletProvider>
+          <Navbar />
+          <main className="pt-14">{children}</main>
+        </WalletProvider>
       </body>
     </html>
   )
