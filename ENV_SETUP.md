@@ -171,7 +171,49 @@ In your Railway worker service, set these variables:
 
 ---
 
-## 5. Runtime validation
+## 5. Cloudflare R2 image storage setup
+
+BillionBoard stores ad creative images in Cloudflare R2 (S3-compatible object storage).
+
+### Create an R2 bucket
+
+1. Log in to [dash.cloudflare.com](https://dash.cloudflare.com) and navigate to **R2 Object Storage**.
+2. Click **Create bucket** and name it (e.g. `billionboard-ads`).
+3. Note the bucket name — this is `R2_BUCKET_NAME`.
+4. Your Cloudflare account ID is in the URL: `dash.cloudflare.com/<ACCOUNT_ID>/r2/…` — this is `R2_ACCOUNT_ID`.
+
+### Create R2 API credentials
+
+1. In the R2 overview, click **Manage R2 API tokens**.
+2. Click **Create API token** → choose **Object Read & Write** permissions, scoped to your bucket.
+3. Copy the **Access Key ID** → `R2_ACCESS_KEY_ID`.
+4. Copy the **Secret Access Key** → `R2_SECRET_ACCESS_KEY`. **Store this now** — Cloudflare won't show it again.
+
+### Enable public access
+
+1. In your R2 bucket settings, click **Settings** → **Public access**.
+2. Enable **Allow public access** or add a custom domain.
+3. Copy the public URL (e.g. `https://pub-xxxx.r2.dev`) → `R2_PUBLIC_URL`.
+
+> Make sure `R2_PUBLIC_URL` has **no trailing slash**.
+
+### Set the variables
+
+Add these to `.env.local` (local dev), Vercel environment variables (production), and Railway worker variables:
+
+```
+R2_ACCOUNT_ID=your-cloudflare-account-id
+R2_ACCESS_KEY_ID=your-r2-key-id
+R2_SECRET_ACCESS_KEY=your-r2-secret
+R2_BUCKET_NAME=billionboard-ads
+R2_PUBLIC_URL=https://pub-xxxx.r2.dev
+```
+
+> **If R2 is not configured**, the upload endpoint returns a 500 error and the /advertise page shows a clear error message. All other features work without R2.
+
+---
+
+## 6. Runtime validation
 
 The file `lib/env.ts` exports a validated `env` object. In production it throws a descriptive error at startup if any critical variable is missing, so you catch misconfiguration at deploy time rather than at request time.
 

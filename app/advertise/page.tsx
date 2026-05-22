@@ -1,25 +1,140 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import Billboard from '@/components/Billboard'
-import type { TileStatusMap } from '@/lib/types'
+import ImageUpload from '@/components/ImageUpload'
+import Loupe from '@/components/Loupe'
+import { BOARD_COLUMNS, BOARD_ROWS } from '@/lib/types'
+import type { TileInfoMap } from '@/lib/types'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
 type Step = 'select' | 'creative' | 'review' | 'submitted'
+
+interface PendingDeposit {
+  topupId: string
+  depositWallet: string
+  advertiserWallet: string
+  expiresAt: string
+}
+
+const ZOOM_LEVELS = [1, 1.5, 2, 3, 4, 6, 8] as const
+type ZoomLevel = (typeof ZOOM_LEVELS)[number]
 
 export default function AdvertisePage() {
   const [authState, setAuthState] = useState<AuthState>('idle')
   const [email, setEmail] = useState('')
   const [balance, setBalance] = useState<number | null>(null)
-  const [tiles, setTiles] = useState<TileStatusMap>({})
+  const [tiles, setTiles] = useState<TileInfoMap>({})
+  const [tilePrice, setTilePrice] = useState(1)
+  const [freeRental, setFreeRental] = useState({ enabled: false, days: 0 })
   const [selectedTiles, setSelectedTiles] = useState<Set<number>>(new Set())
   const [step, setStep] = useState<Step>('select')
   const [topupAmount, setTopupAmount] = useState('10')
   const [topping, setTopping] = useState(false)
+  const [showTopup, setShowTopup] = useState(false)
+  const [walletAddress, setWalletAddress] = useState('')
+  const [walletInput, setWalletInput] = useState('')
+  const [savingWallet, setSavingWallet] = useState(false)
+  const [pendingDeposit, setPendingDeposit] = useState<PendingDeposit | null>(null)
+  const [copied, setCopied] = useState(false)
   const [form, setForm] = useState({ imageUrl: '', destUrl: '', altText: '' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [uploadError, setUploadError] = useState('')
   const [topupError, setTopupError] = useState('')
+
+  // Zoom / pan state for the tile selector
+  const [zoomIdx, setZoomIdx] = useState(2)
+  const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
+  const boardContainerRef = useRef<HTMLDivElement>(null)
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
+  const initialScrollDone = useRef(false)
+
+  const zoomIn = useCallback(
+    () => setZoomIdx((i) => Math.min(i + 1, ZOOM_LEVELS.length - 1)),
+    []
+  )
+  const zoomOut = useCallback(() => setZoomIdx((i) => Math.max(i - 1, 0)), [])
+
+  // Board display dimensions (computed before effects that depend on them)
+  const aspect = BOARD_COLUMNS / BOARD_ROWS
+  const fitW =
+    containerSize.h > 0
+      ? Math.min(containerSize.w, containerSize.h * aspect)
+      : containerSize.w || 800
+  const fitH = fitW / aspect
+  const boardW = fitW * zoom
+  const boardH = fitH * zoom
+
+  // Observe container resize to compute fit dimensions
+  useEffect(() => {
+    const el = boardContainerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect
+      setContainerSize({ w: width, h: height })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [step]) // re-attach when step changes (container mounts/unmounts)
+
+  // Reset center-scroll flag when the select step re-mounts
+  useEffect(() => {
+    if (step === 'select') initialScrollDone.current = false
+  }, [step])
+
+  // Center the board on first measurement at each step visit
+  useEffect(() => {
+    if (initialScrollDone.current) return
+    const el = boardContainerRef.current
+    if (!el || containerSize.w === 0 || boardW === 0) return
+    initialScrollDone.current = true
+    el.scrollLeft = Math.max(0, (boardW - containerSize.w) / 2)
+    el.scrollTop = Math.max(0, (boardH - containerSize.h) / 2)
+  }, [containerSize.w, containerSize.h, boardW, boardH])
+
+  // Wheel zoom (no-modifier scroll = zoom)
+  useEffect(() => {
+    const el = boardContainerRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      if (e.deltaY < 0) zoomIn()
+      else zoomOut()
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [step, zoomIn, zoomOut])
+
+  // Loupe state
+  const [loupeEnabled, setLoupeEnabled] = useState(true)
+  const [loupeCursor, setLoupeCursor] = useState<{
+    tileId: number | null
+    canvasX: number
+    canvasY: number
+    viewportX: number
+    viewportY: number
+    canvas: HTMLCanvasElement | null
+  } | null>(null)
+
+  const handleCursorMove = useCallback(
+    (info: {
+      tileId: number | null
+      canvasX: number
+      canvasY: number
+      viewportX: number
+      viewportY: number
+      canvas: HTMLCanvasElement
+    }) => {
+      if (!loupeEnabled) return
+      setLoupeCursor({ ...info })
+    },
+    [loupeEnabled]
+  )
+
+  const handleCursorLeave = useCallback(() => {
+    setLoupeCursor(null)
+  }, [])
 
   const loadTiles = useCallback(async () => {
     const res = await fetch('/api/tiles')
@@ -32,14 +147,43 @@ export default function AdvertisePage() {
     if (res.ok) {
       const data = await res.json()
       setBalance(Number(data.balance))
+      setWalletAddress(data.walletAddress ?? '')
+      setWalletInput(data.walletAddress ?? '')
       setAuthState('logged_in')
+      // Resume pending deposit if one exists
+      const pending = (data.topups as Array<{ status: string; id: string; depositWallet: string; advertiserWallet: string; expiresAt: string }>)
+        ?.find((t) => t.status === 'PENDING' && data.topups[0]?.method !== 'mock')
+      if (pending) {
+        setPendingDeposit({
+          topupId: pending.id,
+          depositWallet: pending.depositWallet,
+          advertiserWallet: pending.advertiserWallet,
+          expiresAt: pending.expiresAt,
+        })
+      }
     }
+  }, [])
+
+  const loadSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/settings')
+      if (res.ok) {
+        const data = await res.json()
+        const price = parseFloat(data.settings.tile_price_usd_per_day ?? '1') || 1
+        setTilePrice(price)
+        setFreeRental({
+          enabled: data.settings.free_rental_enabled === 'true',
+          days: parseInt(data.settings.free_rental_days, 10) || 0,
+        })
+      }
+    } catch { /* fallback to $1 */ }
   }, [])
 
   useEffect(() => {
     loadTiles()
     loadBalance()
-  }, [loadTiles, loadBalance])
+    loadSettings()
+  }, [loadTiles, loadBalance, loadSettings])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -56,35 +200,116 @@ export default function AdvertisePage() {
     }
   }
 
-  const handleTopup = async (e: React.FormEvent) => {
+  const handleSaveWallet = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSavingWallet(true)
+    setTopupError('')
+    try {
+      const res = await fetch('/api/user/wallet', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress: walletInput.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setTopupError(data.error ?? 'Failed to save wallet')
+      } else {
+        setWalletAddress(walletInput.trim())
+        setTopupError('')
+      }
+    } catch {
+      setTopupError('Network error')
+    } finally {
+      setSavingWallet(false)
+    }
+  }
+
+  const handleRequestDeposit = async () => {
+    setTopping(true)
+    setTopupError('')
+    try {
+      const res = await fetch('/api/topup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'usdc_solana' }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setTopupError(data.error ?? 'Failed to create deposit request')
+      } else {
+        setPendingDeposit({
+          topupId: data.topupId,
+          depositWallet: data.depositWallet,
+          advertiserWallet: data.advertiserWallet,
+          expiresAt: data.expiresAt,
+        })
+      }
+    } catch {
+      setTopupError('Network error')
+    } finally {
+      setTopping(false)
+    }
+  }
+
+  const handleMockTopup = async (e: React.FormEvent) => {
     e.preventDefault()
     setTopping(true)
     setTopupError('')
-    const res = await fetch('/api/topup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount: topupAmount }),
-    })
-    const data = await res.json()
-    if (res.ok) {
-      setBalance(Number(data.newBalance))
-    } else {
-      setTopupError(data.error ?? 'Top-up failed')
+    try {
+      const res = await fetch('/api/topup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'mock', amount: topupAmount }),
+      })
+      const text = await res.text()
+      type TopupResult = { ok?: boolean; newBalance?: number; error?: string }
+      let data: TopupResult | null = null
+      try { data = text ? (JSON.parse(text) as TopupResult) : null } catch { /* ignore */ }
+      if (!res.ok || !data?.ok) {
+        setTopupError(data?.error ?? 'Top-up failed. Please try again.')
+      } else {
+        setBalance(Number(data.newBalance))
+      }
+    } catch {
+      setTopupError('Network error. Check your connection and try again.')
+    } finally {
+      setTopping(false)
     }
-    setTopping(false)
   }
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  // Poll for deposit confirmation
+  useEffect(() => {
+    if (!pendingDeposit) return
+    const interval = setInterval(async () => {
+      const res = await fetch('/api/topup')
+      if (!res.ok) return
+      const data = await res.json()
+      setBalance(Number(data.balance))
+      const stillPending = (data.topups as Array<{ id: string; status: string }>)
+        ?.find((t) => t.id === pendingDeposit.topupId)
+      if (!stillPending || stillPending.status !== 'PENDING') {
+        setPendingDeposit(null)
+        setShowTopup(false)
+      }
+    }, 10000)
+    return () => clearInterval(interval)
+  }, [pendingDeposit])
 
   const handleTileClick = useCallback(
     (tileId: number) => {
-      const status = tiles[tileId]
+      const status = tiles[tileId]?.status
       if (status === 'ACTIVE' || status === 'PENDING') return
       setSelectedTiles((prev) => {
         const next = new Set(prev)
-        if (next.has(tileId)) {
-          next.delete(tileId)
-        } else {
-          next.add(tileId)
-        }
+        if (next.has(tileId)) next.delete(tileId)
+        else next.add(tileId)
         return next
       })
     },
@@ -94,6 +319,9 @@ export default function AdvertisePage() {
   const handleSubmit = async () => {
     setSubmitting(true)
     setError('')
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[advertise] submitting imageUrl:', form.imageUrl)
+    }
     const res = await fetch('/api/rentals', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -114,17 +342,16 @@ export default function AdvertisePage() {
     setSubmitting(false)
   }
 
-  const cost = selectedTiles.size * 1
-  const canAfford = balance !== null && balance >= cost
+  const cost = selectedTiles.size * tilePrice
+  const canAfford = freeRental.enabled || balance !== null && balance >= cost
 
+  // ── Login screen ────────────────────────────────────────────────────────────
   if (authState !== 'logged_in') {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="w-full max-w-sm">
           <h1 className="text-2xl font-black text-white mb-1">Advertise on BillionBoard</h1>
-          <p className="text-white/40 text-sm mb-6">
-            Sign in to select tiles and launch your ad
-          </p>
+          <p className="text-white/40 text-sm mb-6">Sign in to select tiles and launch your ad</p>
           <form onSubmit={handleLogin} className="space-y-3">
             <input
               type="email"
@@ -142,7 +369,6 @@ export default function AdvertisePage() {
               {authState === 'logging_in' ? 'Signing in…' : 'Continue with email'}
             </button>
           </form>
-          {/* TODO: replace with Privy wallet connect */}
           <p className="text-center text-white/20 text-xs mt-4">
             Wallet connect coming after $BOARD launch
           </p>
@@ -151,6 +377,7 @@ export default function AdvertisePage() {
     )
   }
 
+  // ── Submitted screen ────────────────────────────────────────────────────────
   if (step === 'submitted') {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
@@ -165,6 +392,8 @@ export default function AdvertisePage() {
               setStep('select')
               setSelectedTiles(new Set())
               setForm({ imageUrl: '', destUrl: '', altText: '' })
+              setUploadError('')
+              setZoomIdx(0)
             }}
             className="text-green-400 hover:text-green-300 text-sm transition-colors"
           >
@@ -175,50 +404,149 @@ export default function AdvertisePage() {
     )
   }
 
+  // ── Main advertise layout ────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen">
-      {/* Top bar */}
-      <div className="border-b border-white/10 px-4 py-3">
+    <div className="flex flex-col" style={{ height: 'calc(100vh - 56px)' }}>
+
+      {/* ── Top bar: balance + topup ── */}
+      <div className="flex-shrink-0 border-b border-white/10 px-4 py-2.5">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             <div className="text-xs text-white/40 uppercase tracking-widest">Balance</div>
-            <div className="font-mono font-bold text-white">
+            <div className="font-mono font-bold text-white text-sm">
               ${balance?.toFixed(2) ?? '…'} USDC
             </div>
-            {/* Mini top-up form */}
-            <form onSubmit={handleTopup} className="flex items-center gap-2">
-              <input
-                type="number"
-                min="1"
-                max="10000"
-                value={topupAmount}
-                onChange={(e) => setTopupAmount(e.target.value)}
-                className="w-20 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-green-400"
-              />
-              <button
-                type="submit"
-                disabled={topping}
-                className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded transition-colors disabled:opacity-50"
-              >
-                {topping ? '…' : '+ Top up (mock)'}
-              </button>
-            </form>
-            {/* TODO: replace mock top-up with real USDC detection */}
+            <button
+              onClick={() => setShowTopup((v) => !v)}
+              className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded transition-colors"
+            >
+              + Top up
+            </button>
             {topupError && <span className="text-red-400 text-xs">{topupError}</span>}
           </div>
-
           <div className="flex items-center gap-2 text-xs text-white/40">
-            <span className="text-white font-bold">{selectedTiles.size}</span> tiles selected
-            &nbsp;·&nbsp;
+            {freeRental.enabled && freeRental.days > 0 && (
+              <span className="text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full text-[10px] font-medium">
+                First {freeRental.days}d free
+              </span>
+            )}
+            <span className="text-white font-bold">{selectedTiles.size}</span> tiles
+            selected&nbsp;·&nbsp;
             <span className={canAfford ? 'text-green-400' : 'text-red-400'}>
-              ${cost}/day
+              {freeRental.enabled ? '$0 (free)' : `$${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}
             </span>
           </div>
         </div>
+
+        {/* ── Expanded top-up panel ── */}
+        {showTopup && (
+          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-4 bg-white/2 space-y-4">
+
+            {/* Wallet address */}
+            <form onSubmit={handleSaveWallet} className="space-y-2">
+              <label className="block text-xs text-white/50 uppercase tracking-widest">
+                Your Solana wallet address
+              </label>
+              <div className="flex gap-2">
+                <input
+                  value={walletInput}
+                  onChange={(e) => setWalletInput(e.target.value)}
+                  placeholder="Paste your Solana address (base58)"
+                  className="flex-1 bg-white/5 border border-white/10 rounded px-3 py-1.5 text-white text-xs font-mono focus:outline-none focus:border-green-400 placeholder-white/20"
+                />
+                <button
+                  type="submit"
+                  disabled={savingWallet || walletInput.trim() === walletAddress}
+                  className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded transition-colors disabled:opacity-40"
+                >
+                  {savingWallet ? '…' : 'Save'}
+                </button>
+              </div>
+              {walletAddress && (
+                <p className="text-green-400/70 text-[10px]">Saved: {walletAddress}</p>
+              )}
+            </form>
+
+            {/* Deposit instructions */}
+            {walletAddress && !pendingDeposit && (
+              <div>
+                <p className="text-xs text-white/50 mb-2">
+                  Send USDC (SPL) from your saved wallet to our deposit address. We&apos;ll credit your
+                  account automatically within minutes.
+                </p>
+                <button
+                  onClick={handleRequestDeposit}
+                  disabled={topping}
+                  className="text-xs bg-green-400/20 hover:bg-green-400/30 border border-green-400/30 text-green-400 px-4 py-1.5 rounded transition-colors disabled:opacity-50"
+                >
+                  {topping ? 'Creating…' : 'Create deposit request'}
+                </button>
+              </div>
+            )}
+
+            {pendingDeposit && (
+              <div className="space-y-3">
+                <div className="bg-green-400/5 border border-green-400/20 rounded-lg p-3 space-y-2">
+                  <p className="text-xs text-white/50 font-medium">Send USDC to this address:</p>
+                  <div className="flex items-center gap-2">
+                    <code className="text-green-400 text-xs font-mono break-all flex-1">
+                      {pendingDeposit.depositWallet}
+                    </code>
+                    <button
+                      onClick={() => handleCopy(pendingDeposit.depositWallet)}
+                      className="text-[10px] bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded flex-shrink-0 transition-colors"
+                    >
+                      {copied ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                  <p className="text-white/30 text-[10px]">
+                    From: <span className="font-mono">{pendingDeposit.advertiserWallet}</span>
+                  </p>
+                  <p className="text-white/30 text-[10px]">
+                    Expires: {new Date(pendingDeposit.expiresAt).toLocaleString()}
+                  </p>
+                  <a
+                    href={`https://solscan.io/account/${pendingDeposit.depositWallet}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors"
+                  >
+                    View on Solscan →
+                  </a>
+                </div>
+                <p className="text-white/30 text-[10px] animate-pulse">
+                  Waiting for deposit… checking every 10s
+                </p>
+              </div>
+            )}
+
+            {/* Dev-only mock top-up */}
+            {process.env.NODE_ENV !== 'production' && (
+              <form onSubmit={handleMockTopup} className="flex items-center gap-2 pt-2 border-t border-white/5">
+                <span className="text-[10px] text-amber-400/60 uppercase tracking-widest">Dev only</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="10000"
+                  value={topupAmount}
+                  onChange={(e) => setTopupAmount(e.target.value)}
+                  className="w-20 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400"
+                />
+                <button
+                  type="submit"
+                  disabled={topping}
+                  className="text-xs bg-amber-400/10 hover:bg-amber-400/20 text-amber-400 px-3 py-1 rounded transition-colors disabled:opacity-50"
+                >
+                  {topping ? '…' : 'Mock top-up'}
+                </button>
+              </form>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Steps */}
-      <div className="border-b border-white/10 px-4 py-2">
+      {/* ── Step indicator ── */}
+      <div className="flex-shrink-0 border-b border-white/10 px-4 py-2">
         <div className="max-w-7xl mx-auto flex gap-4 text-xs">
           {(['select', 'creative', 'review'] as Step[]).map((s, i) => (
             <button
@@ -243,159 +571,271 @@ export default function AdvertisePage() {
         </div>
       </div>
 
-      {/* Content */}
+      {/* ── Step: select tiles (full remaining height) ── */}
       {step === 'select' && (
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <p className="text-white/40 text-xs mb-4">
-            Click tiles to select them. Green = active, amber = pending approval, dark = available.
-          </p>
-          <div className="rounded-xl overflow-hidden border border-white/10 mb-6 overflow-x-auto">
-            <Billboard
+        <div className="flex-1 relative min-h-0">
+          {/* Scrollable zoom viewport */}
+          <div
+            ref={boardContainerRef}
+            className="absolute inset-0 overflow-auto"
+          >
+            {/* Inner wrapper: min-w/h-full so flex centering works at zoom=1 (contain)
+                and the scroll area is never smaller than the board at higher zooms */}
+            <div
+              className="flex items-center justify-center"
+              style={{ minWidth: '100%', minHeight: '100%' }}
+            >
+              {boardW > 0 && (
+                <div style={{ width: boardW, height: boardH, flexShrink: 0 }}>
+                  <Billboard
+                    tiles={tiles}
+                    selectedTiles={selectedTiles}
+                    onTileClick={handleTileClick}
+                    pixelSize={4}
+                    interactive
+                    className="w-full h-full"
+                    onCursorMove={handleCursorMove}
+                    onCursorLeave={handleCursorLeave}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Loupe — fixed-positioned, uses viewport coords, unaffected by scroll */}
+          {loupeEnabled && loupeCursor && (
+            <Loupe
+              sourceCanvas={loupeCursor.canvas}
+              canvasX={loupeCursor.canvasX}
+              canvasY={loupeCursor.canvasY}
+              tileId={loupeCursor.tileId}
               tiles={tiles}
               selectedTiles={selectedTiles}
-              onTileClick={handleTileClick}
-              pixelSize={8}
-              interactive={true}
-              className="min-w-full"
+              pixelSize={4}
+              visible={true}
+              viewportX={loupeCursor.viewportX}
+              viewportY={loupeCursor.viewportY}
+              containerRect={boardContainerRef.current?.getBoundingClientRect() ?? null}
+              tilePrice={tilePrice}
             />
+          )}
+
+          {/* Floating bottom-left: zoom controls + legend */}
+          <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-2 items-start">
+            {/* Legend */}
+            <div className="flex items-center gap-3 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white/40">
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-[#141414] border border-white/20" />
+                Available
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-amber-600" />
+                Pending
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-green-700" />
+                Active
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-blue-600 border border-blue-400" />
+                Selected
+              </span>
+            </div>
+
+            {/* Zoom controls */}
+            <div className="flex items-center gap-1 bg-black/80 border border-white/10 rounded-lg px-2 py-1">
+              <button
+                onClick={zoomOut}
+                disabled={zoomIdx === 0}
+                className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
+                title="Zoom out"
+              >
+                −
+              </button>
+              <span className="text-xs text-white/60 w-8 text-center tabular-nums">
+                {zoom}×
+              </span>
+              <button
+                onClick={zoomIn}
+                disabled={zoomIdx === ZOOM_LEVELS.length - 1}
+                className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
+                title="Zoom in"
+              >
+                +
+              </button>
+              <span className="text-white/20 mx-0.5">|</span>
+              <button
+                onClick={() => setZoomIdx(0)}
+                className="text-xs text-white/50 hover:text-white transition-colors px-1"
+                title="Fit to screen"
+              >
+                Fit
+              </button>
+              <span className="text-white/20 text-xs ml-1 hidden sm:block">· scroll to zoom</span>
+              <span className="text-white/20 mx-0.5">|</span>
+              <button
+                onClick={() => setLoupeEnabled((v) => !v)}
+                className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                  loupeEnabled
+                    ? 'text-green-400 bg-green-400/10 hover:bg-green-400/20'
+                    : 'text-white/40 hover:text-white/70'
+                }`}
+                title="Toggle magnifier"
+              >
+                🔍 {loupeEnabled ? 'On' : 'Off'}
+              </button>
+            </div>
           </div>
-          <div className="flex justify-end">
+
+          {/* Floating bottom-right: hint + next button */}
+          <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-2">
+            {selectedTiles.size === 0 && (
+              <div className="text-xs text-white/30 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5">
+                Click tiles to select · zoom in for precision
+              </div>
+            )}
             <button
               onClick={() => setStep('creative')}
               disabled={selectedTiles.size === 0}
-              className="bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold px-6 py-2.5 rounded-lg text-sm transition-colors"
+              className="bg-green-400 hover:bg-green-300 disabled:opacity-40 disabled:cursor-not-allowed text-black font-bold px-5 py-2.5 rounded-xl text-sm transition-colors shadow-lg shadow-green-400/20"
             >
-              Next: Upload Creative ({selectedTiles.size} tiles) →
+              Next: Upload Creative ({selectedTiles.size} tile{selectedTiles.size !== 1 ? 's' : ''}
+              {freeRental.enabled ? ' — Free' : ` — $${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}) →
             </button>
           </div>
         </div>
       )}
 
+      {/* ── Step: creative (scrollable form) ── */}
       {step === 'creative' && (
-        <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
-          <h2 className="text-lg font-bold text-white">Your Ad Creative</h2>
+        <div className="flex-1 overflow-auto min-h-0">
+          <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
+            <h2 className="text-lg font-bold text-white">Your Ad Creative</h2>
 
-          <div>
-            <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
-              Image URL
-            </label>
-            <input
-              type="url"
-              value={form.imageUrl}
-              onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
-              placeholder="https://…"
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
-            />
-            {/* TODO: replace with file upload to Vercel Blob or similar */}
-            <p className="text-white/25 text-xs mt-1">
-              Direct link to your ad image (PNG/JPG/GIF). File upload coming soon.
-            </p>
-          </div>
+            <div>
+              <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                Ad Image
+              </label>
+              <ImageUpload
+                value={form.imageUrl}
+                onChange={(url) => setForm((f) => ({ ...f, imageUrl: url }))}
+                onError={setUploadError}
+              />
+              {uploadError && <p className="text-red-400 text-xs mt-1.5">{uploadError}</p>}
+            </div>
 
-          <div>
-            <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
-              Destination URL
-            </label>
-            <input
-              type="url"
-              value={form.destUrl}
-              onChange={(e) => setForm((f) => ({ ...f, destUrl: e.target.value }))}
-              placeholder="https://…"
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
-            />
-          </div>
+            <div>
+              <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                Destination URL
+              </label>
+              <input
+                type="url"
+                value={form.destUrl}
+                onChange={(e) => setForm((f) => ({ ...f, destUrl: e.target.value }))}
+                placeholder="https://…"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
+              />
+            </div>
 
-          <div>
-            <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
-              Alt Text <span className="text-white/30">(optional)</span>
-            </label>
-            <input
-              type="text"
-              value={form.altText}
-              onChange={(e) => setForm((f) => ({ ...f, altText: e.target.value }))}
-              placeholder="Brief description of your ad"
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
-            />
-          </div>
+            <div>
+              <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                Alt Text <span className="text-white/30">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={form.altText}
+                onChange={(e) => setForm((f) => ({ ...f, altText: e.target.value }))}
+                placeholder="Brief description of your ad"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
+              />
+            </div>
 
-          <div className="flex gap-3">
-            <button
-              onClick={() => setStep('select')}
-              className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
-            >
-              ← Back
-            </button>
-            <button
-              onClick={() => setStep('review')}
-              disabled={!form.imageUrl || !form.destUrl}
-              className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
-            >
-              Review →
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStep('select')}
+                className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
+              >
+                ← Back
+              </button>
+              <button
+                onClick={() => setStep('review')}
+                disabled={!form.imageUrl.startsWith('https://') || !form.destUrl}
+                className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
+              >
+                Review →
+              </button>
+            </div>
           </div>
         </div>
       )}
 
+      {/* ── Step: review ── */}
       {step === 'review' && (
-        <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
-          <h2 className="text-lg font-bold text-white">Review your order</h2>
+        <div className="flex-1 overflow-auto min-h-0">
+          <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
+            <h2 className="text-lg font-bold text-white">Review your order</h2>
 
-          <div className="border border-white/10 rounded-xl p-4 space-y-3">
-            <div className="flex justify-between text-sm">
-              <span className="text-white/50">Tiles selected</span>
-              <span className="text-white font-mono">{selectedTiles.size}</span>
+            <div className="border border-white/10 rounded-xl p-4 space-y-3">
+              <div className="flex justify-between text-sm">
+                <span className="text-white/50">Tiles selected</span>
+                <span className="text-white font-mono">{selectedTiles.size}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-white/50">Daily rate</span>
+                <span className="text-white font-mono">
+                  {freeRental.enabled
+                    ? `$0 (${freeRental.days}d free)`
+                    : `$${cost % 1 === 0 ? cost : cost.toFixed(2)} USDC/day`}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-white/50">Your balance</span>
+                <span className={`font-mono ${canAfford ? 'text-green-400' : 'text-red-400'}`}>
+                  ${balance?.toFixed(2) ?? '…'} USDC
+                </span>
+              </div>
+              <div className="border-t border-white/10 pt-3">
+                <div className="text-xs text-white/40">Destination</div>
+                <div className="text-sm text-white/70 truncate">{form.destUrl}</div>
+              </div>
+              <div>
+                <div className="text-xs text-white/40">Image</div>
+                <div className="text-sm text-white/70 truncate">{form.imageUrl}</div>
+              </div>
             </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-white/50">Daily rate</span>
-              <span className="text-white font-mono">${cost.toFixed(2)} USDC/day</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-white/50">Your balance</span>
-              <span className={`font-mono ${canAfford ? 'text-green-400' : 'text-red-400'}`}>
-                ${balance?.toFixed(2) ?? '…'} USDC
-              </span>
-            </div>
-            <div className="border-t border-white/10 pt-3">
-              <div className="text-xs text-white/40">Destination</div>
-              <div className="text-sm text-white/70 truncate">{form.destUrl}</div>
-            </div>
-            <div>
-              <div className="text-xs text-white/40">Image</div>
-              <div className="text-sm text-white/70 truncate">{form.imageUrl}</div>
-            </div>
-          </div>
 
-          {!canAfford && (
-            <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-              Insufficient balance. Top up at least ${(cost - (balance ?? 0)).toFixed(2)} USDC.
+            {!canAfford && !freeRental.enabled && (
+              <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
+                Insufficient balance. Top up at least ${(cost - (balance ?? 0)).toFixed(2)} USDC.
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
+                {error}
+              </div>
+            )}
+
+            <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3">
+              Your ad will be reviewed before going live. Billing starts on approval. Balance is
+              deducted daily — if it runs out, your tiles are released.
             </div>
-          )}
 
-          {error && (
-            <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-              {error}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStep('creative')}
+                className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
+              >
+                ← Back
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={submitting || !canAfford}
+                className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
+              >
+                {submitting ? 'Submitting…' : 'Submit for approval'}
+              </button>
             </div>
-          )}
-
-          <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3">
-            Your ad will be reviewed before going live. Billing starts on approval. Balance is
-            deducted daily — if it runs out, your tiles are released.
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              onClick={() => setStep('creative')}
-              className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
-            >
-              ← Back
-            </button>
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || !canAfford}
-              className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
-            >
-              {submitting ? 'Submitting…' : 'Submit for approval'}
-            </button>
           </div>
         </div>
       )}

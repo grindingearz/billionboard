@@ -79,24 +79,50 @@ model AdCreative {
 }
 
 model Topup {
-  id        String      @id @default(cuid())
-  userId    String
-  amount    Decimal     @db.Decimal(18, 6)
-  method    String      // 'mock' | 'usdc_solana'
-  txHash    String?
-  status    TopupStatus @default(PENDING)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id               String      @id @default(cuid())
+  userId           String
+  amount           Decimal     @db.Decimal(18, 6)
+  method           String      // 'mock' | 'usdc_solana'
+  txHash           String?
+  status           TopupStatus @default(PENDING)
+  advertiserWallet String?
+  depositWallet    String?
+  txSignature      String?     @unique
+  actualAmount     Decimal?    @db.Decimal(18, 6)
+  rawPayload       String?
+  confirmedAt      DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([status])
+  @@index([advertiserWallet])
 }
 
 enum TopupStatus {
   PENDING
   CONFIRMED
   FAILED
+  EXPIRED
+  UNMATCHED
+  REJECTED
+}
+
+model ProcessedTransaction {
+  id             String   @id @default(cuid())
+  signature      String   @unique
+  source         String   // 'webhook' | 'reconcile'
+  amountUsdc     Decimal  @db.Decimal(18, 6)
+  senderWallet   String?
+  receiverWallet String?
+  topupId        String?
+  processedAt    DateTime @default(now())
+
+  @@index([senderWallet])
+  @@index([receiverWallet])
 }
 
 model DailyBillingRun {
@@ -191,4 +217,12 @@ model ExcludedWallet {
   walletAddress String   @unique
   reason        String?
   createdAt     DateTime @default(now())
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

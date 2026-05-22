@@ -2,7 +2,14 @@
 
 import { useState, useEffect, useCallback } from 'react'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs'
+type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups'
+
+interface PricingSettings {
+  tile_price_usd_per_day: string
+  free_rental_enabled: string
+  free_rental_days: string
+  management_fee_percent: string
+}
 
 interface Rental {
   id: string
@@ -31,6 +38,32 @@ interface Epoch {
   snapshotDate: string | null
 }
 
+interface TopupRecord {
+  id: string
+  userId: string
+  status: string
+  method: string
+  amount: string
+  actualAmount: string | null
+  advertiserWallet: string | null
+  depositWallet: string | null
+  txSignature: string | null
+  confirmedAt: string | null
+  expiresAt: string | null
+  createdAt: string
+  user: { email: string | null }
+}
+
+interface UnmatchedTx {
+  id: string
+  signature: string
+  amountUsdc: string
+  senderWallet: string | null
+  receiverWallet: string | null
+  processedAt: string
+  source: string
+}
+
 export default function AdminPage() {
   const [authed, setAuthed] = useState(false)
   const [password, setPassword] = useState('')
@@ -44,6 +77,20 @@ export default function AdminPage() {
   const [billingRunning, setBillingRunning] = useState(false)
   const [epochForm, setEpochForm] = useState({ totalPool: '' })
   const [snapshotForm, setSnapshotForm] = useState({ epochId: '', wallets: '' })
+  const [topupData, setTopupData] = useState<{
+    pending: TopupRecord[]
+    confirmed: TopupRecord[]
+    unmatched: UnmatchedTx[]
+  }>({ pending: [], confirmed: [], unmatched: [] })
+  const [topupSubview, setTopupSubview] = useState<'pending' | 'confirmed' | 'unmatched'>('pending')
+  const defaultPricing: PricingSettings = {
+    tile_price_usd_per_day: '1',
+    free_rental_enabled: 'false',
+    free_rental_days: '0',
+    management_fee_percent: '10',
+  }
+  const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
+  const [pricingSaving, setPricingSaving] = useState(false)
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -80,8 +127,25 @@ export default function AdminPage() {
         const d = await res.json()
         setEpochs(d.epochs ?? [])
       }
+    } else if (view === 'pricing') {
+      const res = await fetch('/api/settings')
+      if (res.ok) {
+        const d = await res.json()
+        setPricingForm({ ...defaultPricing, ...d.settings })
+      }
+    } else if (view === 'topups') {
+      const res = await fetch('/api/admin?view=topups')
+      if (res.ok) {
+        const d = await res.json()
+        setTopupData({
+          pending: d.pending ?? [],
+          confirmed: d.confirmed ?? [],
+          unmatched: d.unmatched ?? [],
+        })
+      }
     }
     setLoading(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
 
   useEffect(() => {
@@ -121,6 +185,33 @@ export default function AdminPage() {
     e.preventDefault()
     await act('create_epoch', { totalPool: epochForm.totalPool })
     setEpochForm({ totalPool: '' })
+  }
+
+  const savePricing = async (e: React.FormEvent) => {
+    e.preventDefault()
+    // Validate
+    const price = parseFloat(pricingForm.tile_price_usd_per_day)
+    const days = parseInt(pricingForm.free_rental_days, 10)
+    const fee = parseFloat(pricingForm.management_fee_percent)
+    if (isNaN(price) || price < 0) { setActionMsg('Price must be ≥ 0'); return }
+    if (isNaN(days) || days < 0) { setActionMsg('Free days must be ≥ 0'); return }
+    if (isNaN(fee) || fee < 0 || fee > 100) { setActionMsg('Fee must be 0–100'); return }
+
+    setPricingSaving(true)
+    const res = await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pricingForm),
+    })
+    const d = await res.json()
+    setPricingSaving(false)
+    if (res.ok) {
+      setPricingForm({ ...defaultPricing, ...d.settings })
+      setActionMsg('Pricing saved ✓')
+      setTimeout(() => setActionMsg(''), 3000)
+    } else {
+      setActionMsg(d.error ?? 'Error saving pricing')
+    }
   }
 
   const submitSnapshot = async (e: React.FormEvent) => {
@@ -186,8 +277,8 @@ export default function AdminPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-6 border-b border-white/10 pb-0">
-        {(['pending', 'active', 'billing', 'epochs'] as AdminView[]).map((v) => (
+      <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
+        {(['pending', 'active', 'billing', 'epochs', 'pricing', 'topups'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -197,7 +288,12 @@ export default function AdminPage() {
                 : 'border-transparent text-white/40 hover:text-white'
             }`}
           >
-            {v === 'pending' ? 'Pending Approval' : v === 'active' ? 'Active Rentals' : v === 'billing' ? 'Billing Runs' : 'Epochs'}
+            {v === 'pending' ? 'Pending Approval'
+              : v === 'active' ? 'Active Rentals'
+              : v === 'billing' ? 'Billing Runs'
+              : v === 'epochs' ? 'Epochs'
+              : v === 'pricing' ? 'Pricing Settings'
+              : 'Top-ups'}
           </button>
         ))}
       </div>
@@ -414,6 +510,224 @@ export default function AdminPage() {
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {view === 'topups' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex gap-1">
+                  {(['pending', 'confirmed', 'unmatched'] as const).map((sv) => (
+                    <button
+                      key={sv}
+                      onClick={() => setTopupSubview(sv)}
+                      className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                        topupSubview === sv
+                          ? 'bg-amber-400/20 text-amber-400'
+                          : 'text-white/40 hover:text-white'
+                      }`}
+                    >
+                      {sv.charAt(0).toUpperCase() + sv.slice(1)}
+                      <span className="ml-1.5 text-[10px] text-white/30">
+                        ({sv === 'pending' ? topupData.pending.length
+                          : sv === 'confirmed' ? topupData.confirmed.length
+                          : topupData.unmatched.length})
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => act('reconcile')}
+                  className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded transition-colors"
+                >
+                  Run reconciliation
+                </button>
+              </div>
+
+              {topupSubview === 'pending' && (
+                <div className="space-y-2">
+                  {topupData.pending.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No pending top-ups.</p>
+                  ) : topupData.pending.map((t) => (
+                    <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${
+                            t.status === 'PENDING' ? 'bg-amber-400/10 text-amber-400' : 'bg-white/10 text-white/40'
+                          }`}>{t.status}</span>
+                          <span className="text-white/50 text-xs">{t.user.email ?? t.userId}</span>
+                        </div>
+                        <div className="text-white/30 text-[10px] font-mono truncate">
+                          From: {t.advertiserWallet ?? '—'}
+                        </div>
+                        <div className="text-white/30 text-[10px] font-mono truncate">
+                          To: {t.depositWallet ?? '—'}
+                        </div>
+                        <div className="text-white/30 text-[10px]">
+                          Created: {new Date(t.createdAt).toLocaleString()}
+                          {t.expiresAt && ` · Expires: ${new Date(t.expiresAt).toLocaleString()}`}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => act('expire_topup', { topupId: t.id })}
+                        className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
+                      >
+                        Expire
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {topupSubview === 'confirmed' && (
+                <div className="space-y-2">
+                  {topupData.confirmed.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No confirmed top-ups.</p>
+                  ) : topupData.confirmed.map((t) => (
+                    <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-400/10 text-green-400">CONFIRMED</span>
+                          <span className="text-white font-mono font-bold text-sm">
+                            ${Number(t.actualAmount ?? t.amount).toFixed(2)} USDC
+                          </span>
+                          <span className="text-white/50 text-xs">{t.user.email ?? t.userId}</span>
+                        </div>
+                        {t.txSignature && (
+                          <a
+                            href={`https://solscan.io/tx/${t.txSignature}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono block"
+                          >
+                            {t.txSignature.slice(0, 16)}… ↗
+                          </a>
+                        )}
+                        <div className="text-white/30 text-[10px]">
+                          {t.confirmedAt ? new Date(t.confirmedAt).toLocaleString() : ''}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {topupSubview === 'unmatched' && (
+                <div className="space-y-2">
+                  {topupData.unmatched.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No unmatched transactions.</p>
+                  ) : topupData.unmatched.map((tx) => (
+                    <div key={tx.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-mono font-bold text-sm">
+                          ${Number(tx.amountUsdc).toFixed(2)} USDC
+                        </span>
+                        <span className="text-white/30 text-[10px] uppercase">{tx.source}</span>
+                      </div>
+                      <div className="text-white/30 text-[10px] font-mono">From: {tx.senderWallet ?? '—'}</div>
+                      <a
+                        href={`https://solscan.io/tx/${tx.signature}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono block"
+                      >
+                        {tx.signature.slice(0, 20)}… ↗
+                      </a>
+                      <div className="text-white/30 text-[10px]">{new Date(tx.processedAt).toLocaleString()}</div>
+                      <p className="text-white/20 text-[10px]">
+                        To assign manually: note the tx ID and use the assign_topup admin action.
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {view === 'pricing' && (
+            <div className="max-w-lg">
+              <form onSubmit={savePricing} className="space-y-5">
+                <div className="border border-white/10 rounded-xl p-5 bg-white/2 space-y-4">
+                  <h3 className="text-sm font-bold text-white">Tile Pricing</h3>
+
+                  <div>
+                    <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                      Price per tile per day (USD)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={pricingForm.tile_price_usd_per_day}
+                      onChange={(e) => setPricingForm((f) => ({ ...f, tile_price_usd_per_day: e.target.value }))}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400"
+                    />
+                    <p className="text-white/30 text-xs mt-1">
+                      e.g. 0 = free, 0.10, 1, 5
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                      Management fee (%)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={pricingForm.management_fee_percent}
+                      onChange={(e) => setPricingForm((f) => ({ ...f, management_fee_percent: e.target.value }))}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="border border-white/10 rounded-xl p-5 bg-white/2 space-y-4">
+                  <h3 className="text-sm font-bold text-white">Free Rental Promo</h3>
+
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="free-rental-enabled"
+                      checked={pricingForm.free_rental_enabled === 'true'}
+                      onChange={(e) =>
+                        setPricingForm((f) => ({ ...f, free_rental_enabled: e.target.checked ? 'true' : 'false' }))
+                      }
+                      className="w-4 h-4 accent-amber-400"
+                    />
+                    <label htmlFor="free-rental-enabled" className="text-sm text-white/70 cursor-pointer">
+                      Enable free rental promo
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
+                      Free days
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={pricingForm.free_rental_days}
+                      onChange={(e) => setPricingForm((f) => ({ ...f, free_rental_days: e.target.value }))}
+                      disabled={pricingForm.free_rental_enabled !== 'true'}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400 disabled:opacity-40"
+                    />
+                    <p className="text-white/30 text-xs mt-1">
+                      When enabled, new rentals are submitted at $0/day for this many days.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={pricingSaving}
+                  className="w-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 font-bold py-2.5 rounded-lg text-sm transition-colors disabled:opacity-50"
+                >
+                  {pricingSaving ? 'Saving…' : 'Save pricing settings'}
+                </button>
+              </form>
             </div>
           )}
         </>

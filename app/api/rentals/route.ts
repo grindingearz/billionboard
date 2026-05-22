@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { TOTAL_TILES } from '@/lib/types'
+import { getTilePrice, isFreeRentalEnabled } from '@/lib/settings'
 
 export async function GET() {
   const session = await getSession()
@@ -37,7 +38,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'imageUrl and destUrl required' }, { status: 400 })
   }
 
-  // Validate URL formats
   try {
     new URL(destUrl)
     new URL(imageUrl)
@@ -60,16 +60,23 @@ export async function POST(req: Request) {
     )
   }
 
-  // Check sufficient balance (1 USDC per tile per day, reserve 1 day)
-  const requiredBalance = tileIds.length * 1
-  const wallet = await prisma.advertiserWallet.findUnique({
-    where: { userId: session.userId },
-  })
-  if (!wallet || Number(wallet.usdcBalance) < requiredBalance) {
-    return NextResponse.json(
-      { error: `Insufficient balance. Need $${requiredBalance} USDC` },
-      { status: 402 }
-    )
+  // Fetch pricing settings
+  const [tilePrice, freeEnabled] = await Promise.all([getTilePrice(), isFreeRentalEnabled()])
+
+  const dailyRate = freeEnabled ? 0 : tilePrice
+
+  if (!freeEnabled) {
+    // Check sufficient balance (1 day reserve)
+    const requiredBalance = tileIds.length * tilePrice
+    const wallet = await prisma.advertiserWallet.findUnique({
+      where: { userId: session.userId },
+    })
+    if (!wallet || Number(wallet.usdcBalance) < requiredBalance) {
+      return NextResponse.json(
+        { error: `Insufficient balance. Need $${requiredBalance.toFixed(2)} USDC` },
+        { status: 402 }
+      )
+    }
   }
 
   // Create creative + rentals in a transaction
@@ -85,6 +92,7 @@ export async function POST(req: Request) {
             tileId,
             creativeId: creative.id,
             status: 'PENDING_APPROVAL',
+            dailyRate,
           },
         })
       )

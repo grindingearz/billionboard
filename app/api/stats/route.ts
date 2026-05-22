@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { TOTAL_TILES } from '@/lib/types'
 
 export async function GET() {
   const [activeTiles, pendingTiles, totalRevenue, latestEpoch, recentBillingRuns] =
@@ -21,7 +22,7 @@ export async function GET() {
   return NextResponse.json({
     activeTiles,
     pendingTiles,
-    availableTiles: 100000 - activeTiles - pendingTiles,
+    availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
     totalRevenue: totalRevenue._sum.amount ?? 0,
     latestEpoch,
     recentBillingRuns,

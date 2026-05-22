@@ -55,6 +55,29 @@ export async function GET(req: Request) {
     return NextResponse.json({ runs })
   }
 
+  if (view === 'topups') {
+    const [pending, confirmed, unmatched] = await Promise.all([
+      prisma.topup.findMany({
+        where: { status: { in: ['PENDING', 'EXPIRED'] }, method: 'usdc_solana' },
+        include: { user: { select: { email: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      prisma.topup.findMany({
+        where: { status: 'CONFIRMED' },
+        include: { user: { select: { email: true } } },
+        orderBy: { confirmedAt: 'desc' },
+        take: 50,
+      }),
+      prisma.processedTransaction.findMany({
+        where: { topupId: null },
+        orderBy: { processedAt: 'desc' },
+        take: 50,
+      }),
+    ])
+    return NextResponse.json({ pending, confirmed, unmatched })
+  }
+
   return NextResponse.json({ error: 'Unknown view' }, { status: 400 })
 }
 
@@ -150,6 +173,63 @@ export async function POST(req: Request) {
     ])
 
     return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'assign_topup') {
+    // Manually assign an unmatched ProcessedTransaction to a user's balance
+    const { txId, userId } = body
+    const tx = await prisma.processedTransaction.findUnique({ where: { id: txId } })
+    if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
+    if (tx.topupId) return NextResponse.json({ error: 'Already assigned' }, { status: 409 })
+
+    const topup = await prisma.topup.create({
+      data: {
+        userId,
+        amount: tx.amountUsdc,
+        method: 'usdc_solana',
+        status: 'CONFIRMED',
+        txSignature: tx.signature,
+        actualAmount: tx.amountUsdc,
+        advertiserWallet: tx.senderWallet,
+        depositWallet: tx.receiverWallet,
+        confirmedAt: tx.processedAt,
+      },
+    })
+    await prisma.$transaction([
+      prisma.processedTransaction.update({
+        where: { id: txId },
+        data: { topupId: topup.id },
+      }),
+      prisma.advertiserWallet.upsert({
+        where: { userId },
+        create: { userId, usdcBalance: tx.amountUsdc },
+        update: { usdcBalance: { increment: tx.amountUsdc } },
+      }),
+    ])
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'expire_topup') {
+    const { topupId } = body
+    await prisma.topup.update({
+      where: { id: topupId },
+      data: { status: 'EXPIRED' },
+    })
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'reconcile') {
+    const res = await fetch(
+      `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/cron/reconcile-usdc-topups`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CRON_SECRET ?? ''}`,
+        },
+      }
+    )
+    const d = await res.json()
+    return NextResponse.json(d)
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

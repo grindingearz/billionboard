@@ -1,6 +1,9 @@
-export const GRID_COLS = 1000
-export const GRID_ROWS = 100
-export const TOTAL_TILES = GRID_COLS * GRID_ROWS
+export const BOARD_COLUMNS = 400
+export const BOARD_ROWS = 250
+export const TOTAL_TILES = BOARD_COLUMNS * BOARD_ROWS             // 100,000
+export const TILE_PIXEL_SIZE = 100                                // 100×100 conceptual px per tile
+export const TOTAL_CONCEPTUAL_PIXELS =
+  TOTAL_TILES * TILE_PIXEL_SIZE * TILE_PIXEL_SIZE                 // 1,000,000,000
 
 export type TileStatus = 'AVAILABLE' | 'PENDING' | 'ACTIVE' | 'EXPIRED'
 
@@ -32,10 +35,23 @@ export interface TileStatusMap {
   [tileId: number]: TileStatus
 }
 
+export interface TileInfo {
+  status: TileStatus
+  creativeId?: string
+  imageUrl?: string
+  destUrl?: string
+  altText?: string
+  advertiserEmail?: string
+}
+
+export interface TileInfoMap {
+  [tileId: number]: TileInfo
+}
+
 export function tileIdToCoords(id: number): { col: number; row: number } {
-  return { col: id % GRID_COLS, row: Math.floor(id / GRID_COLS) }
+  return { col: id % BOARD_COLUMNS, row: Math.floor(id / BOARD_COLUMNS) }
 }
 
 export function coordsToTileId(col: number, row: number): number {
-  return col + row * GRID_COLS
+  return col + row * BOARD_COLUMNS
 }

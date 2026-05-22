@@ -54,10 +54,11 @@ export async function POST(req: Request) {
     const wallet = rentals[0].user.advertiserWallet
     if (!wallet) continue
 
-    const charge = rentals.length * 1 // $1 per tile per day
+    // Use each rental's stored dailyRate (set at submission time)
+    const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)
     const balance = Number(wallet.usdcBalance)
 
-    if (balance < charge) {
+    if (charge > 0 && balance < charge) {
       // Insufficient funds — expire all active rentals for this user
       for (const r of rentals) {
         expired.push(r.id)
@@ -80,19 +81,20 @@ export async function POST(req: Request) {
 
   // Apply in transaction
   await prisma.$transaction([
-    // Deduct balances
+    // Deduct balances (sum of dailyRates per user)
     ...Array.from(byUser.entries())
       .filter(([, rentals]) => {
-        const charge = rentals.length
+        const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)
         const balance = Number(rentals[0].user.advertiserWallet?.usdcBalance ?? 0)
-        return balance >= charge
+        return charge === 0 || balance >= charge
       })
-      .map(([userId, rentals]) =>
-        prisma.advertiserWallet.update({
+      .map(([userId, rentals]) => {
+        const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)
+        return prisma.advertiserWallet.update({
           where: { userId },
-          data: { usdcBalance: { decrement: rentals.length } },
+          data: { usdcBalance: { decrement: charge } },
         })
-      ),
+      }),
     // Expire underfunded rentals
     ...(expired.length > 0
       ? [

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { tileIdToCoords } from '@/lib/types'
+import { tileIdToCoords, TOTAL_TILES } from '@/lib/types'
 
 export async function GET(
   _req: Request,
@@ -8,7 +8,7 @@ export async function GET(
 ) {
   const { id } = await params
   const tileId = parseInt(id, 10)
-  if (isNaN(tileId) || tileId < 0 || tileId >= 100000) {
+  if (isNaN(tileId) || tileId < 0 || tileId >= TOTAL_TILES) {
     return NextResponse.json({ error: 'Invalid tile id' }, { status: 400 })
   }
 

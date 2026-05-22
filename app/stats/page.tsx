@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma'
+import { TOTAL_TILES } from '@/lib/types'
 
 async function getStats() {
   try {
@@ -20,7 +21,7 @@ async function getStats() {
     return {
       activeTiles,
       pendingTiles,
-      availableTiles: 100000 - activeTiles - pendingTiles,
+      availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
       totalRevenue: Number(revenueAgg._sum.amount ?? 0),
       billingRuns,
       epochs,
@@ -29,7 +30,7 @@ async function getStats() {
     return {
       activeTiles: 0,
       pendingTiles: 0,
-      availableTiles: 100000,
+      availableTiles: TOTAL_TILES,
       totalRevenue: 0,
       billingRuns: [],
       epochs: [],
@@ -90,17 +91,17 @@ export default async function StatsPage() {
         <div className="flex justify-between items-center mb-3">
           <span className="text-sm font-bold text-white">Tile Occupancy</span>
           <span className="text-xs text-white/40">
-            {((s.activeTiles / 100000) * 100).toFixed(3)}% full
+            {((s.activeTiles / TOTAL_TILES) * 100).toFixed(3)}% full
           </span>
         </div>
         <div className="h-3 bg-white/5 rounded-full overflow-hidden flex">
           <div
             className="h-full bg-green-600 transition-all"
-            style={{ width: `${(s.activeTiles / 100000) * 100}%` }}
+            style={{ width: `${(s.activeTiles / TOTAL_TILES) * 100}%` }}
           />
           <div
             className="h-full bg-amber-600 transition-all"
-            style={{ width: `${(s.pendingTiles / 100000) * 100}%` }}
+            style={{ width: `${(s.pendingTiles / TOTAL_TILES) * 100}%` }}
           />
         </div>
         <div className="flex gap-4 mt-2 text-xs text-white/40">
