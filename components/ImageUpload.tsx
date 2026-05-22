@@ -42,15 +42,20 @@ export default function ImageUpload({ value, onChange, onError }: ImageUploadPro
         const res = await fetch('/api/upload', { method: 'POST', body: fd })
         type UploadResult = { ok?: boolean; url?: string; error?: string }
         let data: UploadResult | null = null
+        let rawText = ''
         try {
-          const text = await res.text()
-          data = text ? (JSON.parse(text) as UploadResult) : null
+          rawText = await res.text()
+          data = rawText ? (JSON.parse(rawText) as UploadResult) : null
         } catch {
-          // non-JSON error body
+          // non-JSON body — rawText still has the raw response for display
         }
 
         if (!res.ok || !data?.ok) {
-          onError(data?.error ?? 'Upload failed')
+          const errMsg =
+            res.status === 401
+              ? 'Please sign in again'
+              : data?.error ?? (rawText.slice(0, 200) || 'Upload failed. Please try again.')
+          onError(errMsg)
           setPreview(null)
           onChange('')
           return

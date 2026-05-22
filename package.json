@@ -21,6 +21,7 @@
     "@aws-sdk/client-s3": "^3.1052.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "@solana/spl-token": "^0.4.14",
     "@solana/wallet-adapter-backpack": "^0.1.14",
     "@solana/wallet-adapter-react": "^0.15.39",
     "@solana/wallet-adapter-react-ui": "^0.9.39",

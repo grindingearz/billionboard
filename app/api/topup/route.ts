@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { Prisma } from '@/app/generated/prisma/client'
 import { getSession } from '@/lib/auth'
 import { getDepositWallet, TOPUP_EXPIRY_HOURS } from '@/lib/usdc-topup'
 
@@ -79,6 +80,47 @@ export async function POST(req: Request) {
     advertiserWallet: user.walletAddress,
     expiresAt: topup.expiresAt,
   })
+}
+
+// Store the on-chain tx signature as a hint on the pending topup.
+// Does NOT confirm the topup — Helius webhook/reconcile is still source of truth.
+export async function PATCH(req: Request) {
+  const session = await getSession()
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { topupId, txSignature } = await req.json()
+  if (!topupId || !txSignature) {
+    return NextResponse.json({ error: 'topupId and txSignature required' }, { status: 400 })
+  }
+
+  // Fetch without status filter so we can handle already-confirmed topups gracefully
+  const topup = await prisma.topup.findFirst({
+    where: { id: topupId, userId: session.userId },
+    select: { status: true, txSignature: true },
+  })
+  if (!topup) return NextResponse.json({ error: 'Topup not found' }, { status: 404 })
+
+  // Already processed by Helius — nothing to update, signal ok so frontend can move on
+  if (topup.status !== 'PENDING') return NextResponse.json({ ok: true })
+
+  // Idempotent: exact same signature already stored on this topup
+  if (topup.txSignature === txSignature) return NextResponse.json({ ok: true })
+
+  try {
+    await prisma.topup.update({ where: { id: topupId }, data: { txSignature } })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      // Unique constraint: a different topup already holds this signature
+      return NextResponse.json(
+        { error: 'This transaction signature is already associated with another top-up' },
+        { status: 409 }
+      )
+    }
+    console.error('[PATCH /api/topup] unexpected error:', e)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+
+  return NextResponse.json({ ok: true })
 }
 
 export async function GET() {
