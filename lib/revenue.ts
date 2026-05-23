@@ -42,16 +42,14 @@ export async function createRevenueEvent(data: {
   })
 }
 
-/** Sum gross revenue (AD_RENT_REVENUE + TRADING_FEE_REVENUE) for a given date. */
+/** Sum gross revenue (AD_RENT_REVENUE + TRADING_FEE_REVENUE) for a given UTC calendar day. */
 export async function getGrossRevenueForDate(date: Date): Promise<{
   adRevenue: number
   tradingFeeRevenue: number
   grossPool: number
 }> {
-  const start = new Date(date)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(date)
-  end.setHours(23, 59, 59, 999)
+  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+  const end = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999))
 
   const [ad, fee] = await Promise.all([
     prisma.revenueEvent.aggregate({

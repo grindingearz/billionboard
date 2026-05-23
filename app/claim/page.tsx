@@ -166,7 +166,7 @@ export default function ClaimPage() {
                   >
                     <div>
                       <div className="text-sm text-white font-medium">
-                        {new Date(s.epoch.epochDate).toLocaleDateString()}
+                        {(() => { const d = new Date(s.epoch.epochDate); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC` })()}
                       </div>
                       <div className="text-xs text-white/40">Epoch distribution</div>
                     </div>
@@ -210,7 +210,7 @@ export default function ClaimPage() {
                     className="flex items-center justify-between px-4 py-2.5 bg-white/3 rounded-lg border border-white/5"
                   >
                     <div className="text-sm text-white/60">
-                      {new Date(c.epoch.epochDate).toLocaleDateString()}
+                      {(() => { const d = new Date(c.epoch.epochDate); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC` })()}
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="font-mono text-white">${Number(c.amount).toFixed(4)}</span>

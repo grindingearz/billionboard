@@ -5,6 +5,7 @@ import { env } from '@/lib/env'
 import { getSetting } from '@/lib/settings'
 import { createRevenueEvent, getGrossRevenueForDate } from '@/lib/revenue'
 import { fetchTokenHolders } from '@/lib/helius'
+import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc } from '@/lib/epoch'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -111,6 +112,21 @@ export async function GET(req: Request) {
       include: { _count: { select: { holderSnapshots: true, claims: true } } },
     })
     return NextResponse.json({ epochs })
+  }
+
+  if (view === 'current_epoch') {
+    const today = todayUtc()
+    const epoch = await getOrCreateEpoch(today)
+    const { adRevenue, tradingFeeRevenue, grossPool } = await getGrossRevenueForDate(today)
+    const feePercentStr = await getSetting('management_fee_percent')
+    const feePercent = parseFloat(feePercentStr)
+    const estimatedMgmtFee = (grossPool * feePercent) / 100
+    const estimatedClaimPool = grossPool - estimatedMgmtFee
+    return NextResponse.json({
+      epoch,
+      liveRevenue: { adRevenue, tradingFeeRevenue, grossPool, feePercent, estimatedMgmtFee, estimatedClaimPool },
+      msUntilClose: msUntilUtcClose(),
+    })
   }
 
   if (view === 'revenue_events') {
@@ -247,22 +263,20 @@ export async function POST(req: Request) {
 
   // ── Distribution actions ────────────────────────────────────────────────────
 
-  if (action === 'create_epoch') {
-    // Create a DRAFT epoch for today (or a given date), or update an existing one
-    const epochDate = body.epochDate ? new Date(body.epochDate) : new Date()
-    epochDate.setHours(0, 0, 0, 0)
+  if (action === 'trigger_close_epoch') {
+    const targetDate = body.epochDate ? new Date(body.epochDate) : yesterdayUtc()
+    try {
+      const epoch = await closeEpochForDate(targetDate)
+      return NextResponse.json({ ok: true, epoch })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return NextResponse.json({ error: message }, { status: 500 })
+    }
+  }
 
-    const epoch = await prisma.distributionEpoch.upsert({
-      where: { epochDate },
-      create: {
-        epochDate,
-        status: 'DRAFT',
-        billingRunId: body.billingRunId ?? null,
-      },
-      update: {
-        billingRunId: body.billingRunId ?? undefined,
-      },
-    })
+  if (action === 'create_epoch') {
+    // Upsert an OPEN epoch for today (or a given date)
+    const epoch = await getOrCreateEpoch(body.epochDate ? new Date(body.epochDate) : new Date())
     return NextResponse.json({ ok: true, epoch })
   }
 

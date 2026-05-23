@@ -238,6 +238,10 @@ enum EpochStatus {
   PENDING
   SNAPSHOT_TAKEN
   // Active values
+  OPEN
+  PROCESSING
+  FAILED
+  READY_NO_TOKEN
   DRAFT
   BILLED
   SNAPSHOTTED

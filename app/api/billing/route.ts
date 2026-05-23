@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
+import { utcDayStart, getOrCreateEpoch } from '@/lib/epoch'
 
 // POST /api/billing — trigger daily billing run (admin or cron secret)
 export async function POST(req: Request) {
@@ -17,8 +18,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
+  const today = utcDayStart(new Date())
 
   const existing = await prisma.dailyBillingRun.findUnique({ where: { runDate: today } })
   if (existing) {
@@ -47,6 +47,7 @@ export async function POST(req: Request) {
     billingRunId: string
     userId: string
     rentalId: string
+    epochId: string
     amount: number
   }> = []
   const billingItems: Array<{
@@ -56,9 +57,10 @@ export async function POST(req: Request) {
     amount: number
   }> = []
 
-  const billingRun = await prisma.dailyBillingRun.create({
-    data: { runDate: today, status: 'pending' },
-  })
+  const [billingRun, todayEpoch] = await Promise.all([
+    prisma.dailyBillingRun.create({ data: { runDate: today, status: 'pending' } }),
+    getOrCreateEpoch(today),
+  ])
 
   // billedDate is the calendar date only (no time), used for BillingItem @@unique
   const billedDate = new Date(today)
@@ -89,6 +91,7 @@ export async function POST(req: Request) {
         billingRunId: billingRun.id,
         userId,
         rentalId: r.id,
+        epochId: todayEpoch.id,
         amount: Number(r.dailyRate),
       })
       billingItems.push({

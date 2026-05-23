@@ -139,6 +139,19 @@ interface DebugAuth {
   isAdminSession: boolean
 }
 
+interface CurrentEpochData {
+  epoch: DistributionEpoch
+  liveRevenue: {
+    adRevenue: number
+    tradingFeeRevenue: number
+    grossPool: number
+    feePercent: number
+    estimatedMgmtFee: number
+    estimatedClaimPool: number
+  }
+  msUntilClose: number
+}
+
 export default function AdminPage() {
   const { publicKey } = useWallet()
   const { setVisible: openWalletModal } = useWalletModal()
@@ -188,6 +201,8 @@ export default function AdminPage() {
   const [snapshotRunning, setSnapshotRunning] = useState(false)
   const [newExcludedWallet, setNewExcludedWallet] = useState('')
   const [newExcludedLabel, setNewExcludedLabel] = useState('')
+  const [currentEpochData, setCurrentEpochData] = useState<CurrentEpochData | null>(null)
+  const [epochCountdown, setEpochCountdown] = useState('')
 
   // Fetch server-side wallet match info whenever connected wallet changes
   useEffect(() => {
@@ -267,14 +282,16 @@ export default function AdminPage() {
         setPricingForm({ ...defaultPricing, ...d.settings })
       }
     } else if (view === 'distribution') {
-      const [epochsRes, eventsRes, excludedRes] = await Promise.all([
+      const [epochsRes, eventsRes, excludedRes, currentEpochRes] = await Promise.all([
         fetch('/api/admin?view=distribution'),
         fetch('/api/admin?view=revenue_events'),
         fetch('/api/admin?view=excluded_wallets'),
+        fetch('/api/admin?view=current_epoch'),
       ])
       if (epochsRes.ok) { const d = await epochsRes.json(); setDistEpochs(d.epochs ?? []) }
       if (eventsRes.ok) { const d = await eventsRes.json(); setRevenueEvents(d.events ?? []) }
       if (excludedRes.ok) { const d = await excludedRes.json(); setExcludedWallets(d.wallets ?? []) }
+      if (currentEpochRes.ok) { const d = await currentEpochRes.json(); setCurrentEpochData(d) }
     } else if (view === 'topups') {
       const res = await fetch('/api/admin?view=topups')
       if (res.ok) {
@@ -293,6 +310,27 @@ export default function AdminPage() {
   useEffect(() => {
     if (authed) load()
   }, [authed, load])
+
+  // Live countdown to UTC midnight
+  useEffect(() => {
+    if (view !== 'distribution') return
+    const tick = () => {
+      const now = Date.now()
+      const nextMidnight = Date.UTC(
+        new Date().getUTCFullYear(),
+        new Date().getUTCMonth(),
+        new Date().getUTCDate() + 1
+      )
+      const ms = nextMidnight - now
+      const h = Math.floor(ms / 3600000)
+      const m = Math.floor((ms % 3600000) / 60000)
+      const s = Math.floor((ms % 60000) / 1000)
+      setEpochCountdown(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [view])
 
   const act = async (action: string, extra: Record<string, string> = {}) => {
     const res = await fetch('/api/admin', {
@@ -1263,39 +1301,76 @@ export default function AdminPage() {
               {/* Epochs sub-tab */}
               {distSubview === 'epochs' && (
                 <div className="space-y-5">
-                  {/* Quick actions */}
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={() => runDistributionAction('create_epoch')}
-                      className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors"
-                    >
-                      + Create today&apos;s epoch (DRAFT)
-                    </button>
-                    <button
-                      onClick={() => runDistributionAction('seed_excluded_wallets')}
-                      className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
-                    >
-                      Seed excluded system wallets
-                    </button>
-                  </div>
+                  {/* Current UTC Epoch card */}
+                  {currentEpochData && (() => {
+                    const { epoch: ce, liveRevenue: lr } = currentEpochData
+                    const d = new Date(ce.epochDate)
+                    const dateStr = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC`
+                    return (
+                      <div className="border border-amber-400/30 bg-amber-400/5 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] text-amber-400/60 uppercase tracking-widest mb-0.5">Current UTC Epoch</div>
+                            <div className="text-white font-bold">{dateStr}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[10px] text-white/30 uppercase tracking-widest mb-0.5">Closes in</div>
+                            <div className="font-mono text-amber-400 font-bold">{epochCountdown}</div>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          {[
+                            { label: 'Ad revenue', v: lr.adRevenue, color: 'text-green-400' },
+                            { label: 'Fee revenue', v: lr.tradingFeeRevenue, color: 'text-blue-400' },
+                            { label: 'Est. claim pool', v: lr.estimatedClaimPool, color: 'text-amber-400' },
+                          ].map(({ label, v, color }) => (
+                            <div key={label} className="bg-white/3 rounded p-2">
+                              <div className={`font-mono font-bold ${color}`}>${v.toFixed(2)}</div>
+                              <div className="text-white/30 text-[10px]">{label}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => runDistributionAction('trigger_close_epoch')}
+                            className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors"
+                          >
+                            Close previous epoch now
+                          </button>
+                          <button
+                            onClick={() => runDistributionAction('seed_excluded_wallets')}
+                            className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
+                          >
+                            Seed excluded system wallets
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })()}
 
                   {/* Epoch cards */}
                   {distEpochs.length === 0 ? (
-                    <p className="text-white/30 text-sm text-center py-8">No epochs yet. Create today&apos;s epoch to get started.</p>
+                    <p className="text-white/30 text-sm text-center py-8">No epochs yet. The current UTC epoch auto-creates on first billing.</p>
                   ) : distEpochs.map((ep) => {
                     const gross = Number(ep.grossPool)
                     const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
+                    const ed = new Date(ep.epochDate)
+                    const epochDateStr = `${ed.getUTCFullYear()}-${String(ed.getUTCMonth()+1).padStart(2,'0')}-${String(ed.getUTCDate()).padStart(2,'0')} UTC`
                     const statusColor =
                       ep.status === 'PUBLISHED' ? 'text-green-400 bg-green-400/10'
                       : ep.status === 'CLOSED' ? 'text-white/30 bg-white/5'
                       : ep.status === 'SNAPSHOTTED' ? 'text-blue-400 bg-blue-400/10'
                       : ep.status === 'BILLED' ? 'text-amber-400 bg-amber-400/10'
+                      : ep.status === 'OPEN' ? 'text-cyan-400 bg-cyan-400/10'
+                      : ep.status === 'PROCESSING' ? 'text-yellow-400 bg-yellow-400/10'
+                      : ep.status === 'FAILED' ? 'text-red-400 bg-red-400/10'
+                      : ep.status === 'READY_NO_TOKEN' ? 'text-purple-400 bg-purple-400/10'
                       : 'text-white/50 bg-white/5'
                     return (
                       <div key={ep.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <div className="text-white font-bold">{new Date(ep.epochDate).toLocaleDateString()}</div>
+                            <div className="text-white font-bold">{epochDateStr}</div>
                             <div className="text-white/25 text-[10px] font-mono">{ep.id}</div>
                           </div>
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor}`}>{ep.status}</span>
@@ -1330,7 +1405,7 @@ export default function AdminPage() {
 
                         {/* Action buttons per status */}
                         <div className="flex flex-wrap gap-2 pt-1">
-                          {ep.status === 'DRAFT' && (
+                          {(ep.status === 'DRAFT' || ep.status === 'OPEN' || ep.status === 'FAILED') && (
                             <button
                               onClick={() => runDistributionAction('calculate_pool', { epochId: ep.id })}
                               className="text-xs bg-white/10 hover:bg-white/20 text-white/70 px-3 py-1 rounded transition-colors"
@@ -1338,7 +1413,7 @@ export default function AdminPage() {
                               Calculate pool
                             </button>
                           )}
-                          {(ep.status === 'BILLED' || ep.status === 'DRAFT') && (
+                          {(ep.status === 'BILLED' || ep.status === 'DRAFT' || ep.status === 'OPEN') && (
                             <button
                               onClick={() => runRealSnapshot(ep.id)}
                               disabled={snapshotRunning}
@@ -1361,6 +1436,14 @@ export default function AdminPage() {
                               className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/40 px-3 py-1 rounded transition-colors"
                             >
                               Close
+                            </button>
+                          )}
+                          {ep.status === 'FAILED' && (
+                            <button
+                              onClick={() => runDistributionAction('trigger_close_epoch', { epochDate: ep.epochDate })}
+                              className="text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 px-3 py-1 rounded transition-colors"
+                            >
+                              Retry close
                             </button>
                           )}
                         </div>
