@@ -54,6 +54,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Deposit wallet not configured' }, { status: 503 })
   }
 
+  const rawAmount = parseFloat(body.amount)
+  if (!rawAmount || rawAmount <= 0) {
+    return NextResponse.json({ error: 'Amount must be greater than 0' }, { status: 400 })
+  }
+
   // Cancel any existing pending topup for this user (one pending at a time)
   await prisma.topup.updateMany({
     where: { userId: session.userId, status: 'PENDING', method: 'usdc_solana' },
@@ -64,7 +69,7 @@ export async function POST(req: Request) {
   const topup = await prisma.topup.create({
     data: {
       userId: session.userId,
-      amount: 0,
+      amount: rawAmount,
       method: 'usdc_solana',
       status: 'PENDING',
       advertiserWallet: user.walletAddress,

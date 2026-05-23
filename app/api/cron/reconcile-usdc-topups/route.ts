@@ -19,7 +19,7 @@ type TxDetail = {
   reason?: string
 }
 
-export async function POST(req: Request) {
+async function runReconcile(req: Request): Promise<Response> {
   if (!authorized(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -156,4 +156,12 @@ export async function POST(req: Request) {
     errors,
     details,
   })
+}
+
+export async function GET(req: Request) {
+  return runReconcile(req)
+}
+
+export async function POST(req: Request) {
+  return runReconcile(req)
 }

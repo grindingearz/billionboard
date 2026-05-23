@@ -1,8 +1,10 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useWallet } from '@solana/wallet-adapter-react'
+import { useWallet, useConnection } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
+import { Transaction, PublicKey } from '@solana/web3.js'
+import { getAssociatedTokenAddress, createTransferInstruction } from '@solana/spl-token'
 import Billboard from '@/components/Billboard'
 import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
@@ -11,19 +13,25 @@ import type { TileInfoMap, DisplayMode } from '@/lib/types'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
 type Step = 'select' | 'creative' | 'review' | 'submitted'
+type PayStatus = 'idle' | 'creating' | 'waiting_wallet' | 'submitting' | 'confirming' | 'timeout'
+
+const USDC_MINT_ADDRESS = process.env.NEXT_PUBLIC_USDC_MINT ?? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 
 interface PendingDeposit {
   topupId: string
   depositWallet: string
   advertiserWallet: string
   expiresAt: string
+  txSignature?: string
+  amount?: number
 }
 
 const ZOOM_LEVELS = [1, 1.5, 2, 3, 4, 6, 8] as const
 type ZoomLevel = (typeof ZOOM_LEVELS)[number]
 
 export default function AdvertisePage() {
-  const { publicKey } = useWallet()
+  const { publicKey, sendTransaction } = useWallet()
+  const { connection } = useConnection()
   const { setVisible: openWalletModal } = useWalletModal()
   const [authState, setAuthState] = useState<AuthState>('idle')
   const [balance, setBalance] = useState<number | null>(null)
@@ -48,11 +56,14 @@ export default function AdvertisePage() {
   const [urlError, setUrlError] = useState('')
   const [displayModeError, setDisplayModeError] = useState('')
   const [topupError, setTopupError] = useState('')
+  const [payStatus, setPayStatus] = useState<PayStatus>('idle')
+  const [topupSuccess, setTopupSuccess] = useState(false)
 
   // Zoom / pan state for the tile selector
   const [zoomIdx, setZoomIdx] = useState(2)
   const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
   const boardContainerRef = useRef<HTMLDivElement>(null)
+  const sentAtRef = useRef<number>(0)
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const initialScrollDone = useRef(false)
 
@@ -156,16 +167,20 @@ export default function AdvertisePage() {
       setWalletAddress(data.walletAddress ?? '')
       setWalletInput(data.walletAddress ?? '')
       setAuthState('logged_in')
-      // Resume pending deposit if one exists
-      const pending = (data.topups as Array<{ status: string; id: string; depositWallet: string; advertiserWallet: string; expiresAt: string }>)
-        ?.find((t) => t.status === 'PENDING' && data.topups[0]?.method !== 'mock')
-      if (pending) {
+      // Resume in-flight payment from a prior session (only if signature was already stored)
+      const pending = (data.topups as Array<{ status: string; id: string; depositWallet: string; advertiserWallet: string; expiresAt: string; txSignature?: string; amount?: number; method?: string }>)
+        ?.find((t) => t.status === 'PENDING' && t.method === 'usdc_solana')
+      if (pending?.txSignature) {
         setPendingDeposit({
           topupId: pending.id,
           depositWallet: pending.depositWallet,
           advertiserWallet: pending.advertiserWallet,
           expiresAt: pending.expiresAt,
+          txSignature: pending.txSignature,
+          amount: pending.amount ? Number(pending.amount) : undefined,
         })
+        setPayStatus('confirming')
+        setShowTopup(true)
       }
     }
   }, [])
@@ -254,28 +269,71 @@ export default function AdvertisePage() {
     }
   }
 
-  const handleRequestDeposit = async () => {
+  const handlePayUsdc = async () => {
+    const amt = parseFloat(topupAmount)
+    if (!amt || amt <= 0) {
+      setTopupError('Enter a valid amount greater than 0')
+      return
+    }
+    if (!publicKey || !sendTransaction) {
+      setTopupError('Wallet not connected')
+      return
+    }
+
     setTopping(true)
     setTopupError('')
+    setPayStatus('creating')
+
     try {
+      // 1. Create pending topup with amount
       const res = await fetch('/api/topup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method: 'usdc_solana' }),
+        body: JSON.stringify({ method: 'usdc_solana', amount: amt }),
       })
-      const data = await res.json()
+      const data = await res.json() as { topupId?: string; depositWallet?: string; advertiserWallet?: string; expiresAt?: string; error?: string }
       if (!res.ok) {
         setTopupError(data.error ?? 'Failed to create deposit request')
-      } else {
-        setPendingDeposit({
-          topupId: data.topupId,
-          depositWallet: data.depositWallet,
-          advertiserWallet: data.advertiserWallet,
-          expiresAt: data.expiresAt,
-        })
+        setPayStatus('idle')
+        return
       }
-    } catch {
-      setTopupError('Network error')
+
+      const { topupId, depositWallet: depWallet, advertiserWallet: advWallet, expiresAt } = data as Required<typeof data>
+      setPendingDeposit({ topupId, depositWallet: depWallet, advertiserWallet: advWallet, expiresAt, amount: amt })
+
+      // 2. Build SPL USDC transfer transaction
+      setPayStatus('waiting_wallet')
+      const usdcMint = new PublicKey(USDC_MINT_ADDRESS)
+      const destPubkey = new PublicKey(depWallet)
+      const fromATA = await getAssociatedTokenAddress(usdcMint, publicKey)
+      const toATA = await getAssociatedTokenAddress(usdcMint, destPubkey)
+      const rawUnits = BigInt(Math.round(amt * 1_000_000))
+
+      const tx = new Transaction().add(createTransferInstruction(fromATA, toATA, publicKey, rawUnits))
+      const { blockhash } = await connection.getLatestBlockhash()
+      tx.recentBlockhash = blockhash
+      tx.feePayer = publicKey
+
+      // 3. Send via wallet adapter — user approves in wallet popup
+      setPayStatus('submitting')
+      const signature = await sendTransaction(tx, connection)
+
+      // 4. Store signature immediately (backend will match on it during reconcile/webhook)
+      await fetch('/api/topup', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topupId, txSignature: signature }),
+      })
+
+      setPendingDeposit((prev) => prev ? { ...prev, txSignature: signature } : null)
+      sentAtRef.current = Date.now()
+      setPayStatus('confirming')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      const isCancel = /reject|cancel|user denied/i.test(msg)
+      setTopupError(isCancel ? 'Transaction cancelled' : (msg || 'Transaction failed'))
+      setPayStatus('idle')
+      setPendingDeposit(null)
     } finally {
       setTopping(false)
     }
@@ -314,23 +372,31 @@ export default function AdvertisePage() {
     })
   }
 
-  // Poll for deposit confirmation
+  // Poll for deposit confirmation (only while waiting for on-chain confirm)
   useEffect(() => {
-    if (!pendingDeposit) return
+    if (!pendingDeposit || (payStatus !== 'confirming' && payStatus !== 'timeout')) return
     const interval = setInterval(async () => {
+      // 60s timeout — only applies when we know the send time from this session
+      if (sentAtRef.current > 0 && payStatus === 'confirming' && Date.now() - sentAtRef.current > 60_000) {
+        setPayStatus('timeout')
+      }
       const res = await fetch('/api/topup')
       if (!res.ok) return
       const data = await res.json()
       setBalance(Number(data.balance))
-      const stillPending = (data.topups as Array<{ id: string; status: string }>)
+      const entry = (data.topups as Array<{ id: string; status: string }>)
         ?.find((t) => t.id === pendingDeposit.topupId)
-      if (!stillPending || stillPending.status !== 'PENDING') {
+      if (!entry || entry.status !== 'PENDING') {
         setPendingDeposit(null)
         setShowTopup(false)
+        setPayStatus('idle')
+        sentAtRef.current = 0
+        setTopupSuccess(true)
+        setTimeout(() => setTopupSuccess(false), 5000)
       }
-    }, 10000)
+    }, 5000)
     return () => clearInterval(interval)
-  }, [pendingDeposit])
+  }, [pendingDeposit, payStatus])
 
   const handleTileClick = useCallback(
     (tileId: number) => {
@@ -468,6 +534,7 @@ export default function AdvertisePage() {
             >
               + Top up
             </button>
+            {topupSuccess && <span className="text-green-400 text-xs font-medium">USDC added!</span>}
             {topupError && <span className="text-red-400 text-xs">{topupError}</span>}
           </div>
           <div className="flex items-center gap-2 text-xs text-white/40">
@@ -507,56 +574,86 @@ export default function AdvertisePage() {
               </div>
             )}
 
-            {/* Deposit instructions */}
-            {(publicKey ? publicKey.toBase58() === walletAddress && walletAddress : walletAddress) && !pendingDeposit && (
-              <div>
-                <p className="text-xs text-white/50 mb-2">
-                  Send USDC (SPL) from your saved wallet to our deposit address. We&apos;ll credit your
-                  account automatically within minutes.
+            {/* Pay USDC — one-click flow */}
+            {publicKey && payStatus === 'idle' && !pendingDeposit && (
+              <div className="space-y-2">
+                <p className="text-xs text-white/50">
+                  Top up instantly with USDC from your connected wallet.
                 </p>
-                <button
-                  onClick={handleRequestDeposit}
-                  disabled={topping}
-                  className="text-xs bg-green-400/20 hover:bg-green-400/30 border border-green-400/30 text-green-400 px-4 py-1.5 rounded transition-colors disabled:opacity-50"
-                >
-                  {topping ? 'Creating…' : 'Create deposit request'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-white/40 text-xs pointer-events-none">$</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="any"
+                      value={topupAmount}
+                      onChange={(e) => setTopupAmount(e.target.value)}
+                      className="w-24 bg-white/5 border border-white/10 rounded-lg pl-5 pr-2 py-1.5 text-white text-xs focus:outline-none focus:border-green-400"
+                    />
+                  </div>
+                  <span className="text-white/30 text-xs">USDC</span>
+                  <button
+                    onClick={handlePayUsdc}
+                    disabled={topping}
+                    className="text-xs bg-green-400/20 hover:bg-green-400/30 border border-green-400/30 text-green-400 px-4 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Pay ${topupAmount || '0'} USDC
+                  </button>
+                </div>
               </div>
             )}
 
-            {pendingDeposit && (
-              <div className="space-y-3">
-                <div className="bg-green-400/5 border border-green-400/20 rounded-lg p-3 space-y-2">
-                  <p className="text-xs text-white/50 font-medium">Send USDC to this address:</p>
-                  <div className="flex items-center gap-2">
-                    <code className="text-green-400 text-xs font-mono break-all flex-1">
-                      {pendingDeposit.depositWallet}
-                    </code>
-                    <button
-                      onClick={() => handleCopy(pendingDeposit.depositWallet)}
-                      className="text-[10px] bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded flex-shrink-0 transition-colors"
-                    >
-                      {copied ? 'Copied!' : 'Copy'}
-                    </button>
-                  </div>
-                  <p className="text-white/30 text-[10px]">
-                    From: <span className="font-mono">{pendingDeposit.advertiserWallet}</span>
-                  </p>
-                  <p className="text-white/30 text-[10px]">
-                    Expires: {new Date(pendingDeposit.expiresAt).toLocaleString()}
-                  </p>
+            {/* In-flight status */}
+            {(payStatus === 'creating' || payStatus === 'waiting_wallet' || payStatus === 'submitting') && (
+              <p className="text-xs text-white/50 animate-pulse">
+                {payStatus === 'creating' && 'Creating payment request…'}
+                {payStatus === 'waiting_wallet' && 'Approve the transaction in your wallet…'}
+                {payStatus === 'submitting' && 'Submitting transaction to Solana…'}
+              </p>
+            )}
+
+            {/* Confirming */}
+            {pendingDeposit && payStatus === 'confirming' && (
+              <div className="bg-green-400/5 border border-green-400/20 rounded-lg p-3 space-y-2">
+                <p className="text-xs text-green-400 font-medium">Payment sent. Waiting for confirmation…</p>
+                {pendingDeposit.txSignature && (
                   <a
-                    href={`https://solscan.io/account/${pendingDeposit.depositWallet}`}
+                    href={`https://solscan.io/tx/${pendingDeposit.txSignature}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors"
+                    className="block text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors font-mono"
+                  >
+                    {pendingDeposit.txSignature.slice(0, 8)}…{pendingDeposit.txSignature.slice(-8)} →
+                  </a>
+                )}
+                <p className="text-white/30 text-[10px] animate-pulse">Checking every 5s…</p>
+              </div>
+            )}
+
+            {/* Timeout */}
+            {pendingDeposit && payStatus === 'timeout' && (
+              <div className="bg-amber-400/5 border border-amber-400/20 rounded-lg p-3 space-y-2">
+                <p className="text-xs text-amber-400 font-medium">Taking longer than expected.</p>
+                <p className="text-white/40 text-[10px]">
+                  Your transaction may still confirm on-chain. Keep this page open or check Solscan.
+                </p>
+                {pendingDeposit.txSignature && (
+                  <a
+                    href={`https://solscan.io/tx/${pendingDeposit.txSignature}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors"
                   >
                     View on Solscan →
                   </a>
-                </div>
-                <p className="text-white/30 text-[10px] animate-pulse">
-                  Waiting for deposit… checking every 10s
-                </p>
+                )}
+                <button
+                  onClick={() => { setPendingDeposit(null); setPayStatus('idle'); sentAtRef.current = 0 }}
+                  className="text-[10px] text-white/40 hover:text-white/70 transition-colors"
+                >
+                  Start over
+                </button>
               </div>
             )}
 

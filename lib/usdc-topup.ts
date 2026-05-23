@@ -63,6 +63,36 @@ export async function processUsdcTransfer(
   const existing = await prisma.processedTransaction.findUnique({ where: { signature } })
   if (existing) return { topupId: existing.topupId, matched: !!existing.topupId, skipped: true, reason: 'duplicate' }
 
+  // txSignature-first match — frontend stores sig immediately after sendTransaction;
+  // this is the most reliable path when the user completes the one-click Pay USDC flow.
+  const byTxSig = await prisma.topup.findFirst({
+    where: {
+      txSignature: signature,
+      depositWallet: receiverWallet,
+      status: 'PENDING',
+      method: 'usdc_solana',
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  if (byTxSig) {
+    await prisma.$transaction([
+      prisma.topup.update({
+        where: { id: byTxSig.id },
+        data: { status: 'CONFIRMED', actualAmount: amountUsdc, rawPayload, confirmedAt: new Date() },
+      }),
+      prisma.advertiserWallet.upsert({
+        where: { userId: byTxSig.userId },
+        create: { userId: byTxSig.userId, usdcBalance: amountUsdc },
+        update: { usdcBalance: { increment: amountUsdc } },
+      }),
+      prisma.processedTransaction.create({
+        data: { signature, source, amountUsdc, senderWallet, receiverWallet, topupId: byTxSig.id },
+      }),
+    ])
+    return { topupId: byTxSig.id, matched: true, skipped: false }
+  }
+
   const pendingTopup = await prisma.topup.findFirst({
     where: {
       advertiserWallet: senderWallet,
