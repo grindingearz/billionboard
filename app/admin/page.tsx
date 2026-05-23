@@ -4,7 +4,16 @@ import { useState, useEffect, useCallback } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups'
+type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset'
+
+interface ResetState {
+  userId: string | null
+  balance: number
+  pendingTopups: number
+  confirmedTopups: number
+  activeRentals: number
+  pendingRentals: number
+}
 
 interface PricingSettings {
   tile_price_usd_per_day: string
@@ -22,6 +31,21 @@ interface Rental {
   dailyRate: number
   creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
   user: { email: string | null; walletAddress: string | null }
+}
+
+interface RentalOrder {
+  creativeId: string | null
+  userId: string
+  tileIds: number[]
+  rentalIds: string[]
+  tileCount: number
+  status: string
+  createdAt: string
+  dailyRateTotal: number
+  creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
+  user: { email: string | null; walletAddress: string | null }
+  blockCols?: number
+  blockRows?: number
 }
 
 interface BillingRun {
@@ -79,6 +103,9 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState('')
   const [view, setView] = useState<AdminView>('pending')
   const [rentals, setRentals] = useState<Rental[]>([])
+  const [pendingOrders, setPendingOrders] = useState<RentalOrder[]>([])
+  const [approveAllConfirm, setApproveAllConfirm] = useState(false)
+  const [rejectAllConfirm, setRejectAllConfirm] = useState(false)
   const [billingRuns, setBillingRuns] = useState<BillingRun[]>([])
   const [epochs, setEpochs] = useState<Epoch[]>([])
   const [loading, setLoading] = useState(false)
@@ -92,6 +119,12 @@ export default function AdminPage() {
     unmatched: UnmatchedTx[]
   }>({ pending: [], confirmed: [], unmatched: [] })
   const [topupSubview, setTopupSubview] = useState<'pending' | 'confirmed' | 'unmatched'>('pending')
+  const [resetWallet, setResetWallet] = useState('')
+  const [resetState, setResetState] = useState<ResetState | null>(null)
+  const [resetConfirm1, setResetConfirm1] = useState(false)
+  const [resetConfirm2, setResetConfirm2] = useState(false)
+  const [fullBoardConfirm, setFullBoardConfirm] = useState('')
+  const [resetting, setResetting] = useState(false)
   const defaultPricing: PricingSettings = {
     tile_price_usd_per_day: '1',
     free_rental_enabled: 'false',
@@ -128,8 +161,16 @@ export default function AdminPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    if (view === 'pending' || view === 'active') {
-      const res = await fetch(`/api/admin?view=${view}`)
+    if (view === 'pending') {
+      const res = await fetch('/api/admin?view=pending')
+      if (res.ok) {
+        const d = await res.json()
+        setPendingOrders(d.orders ?? [])
+        setApproveAllConfirm(false)
+        setRejectAllConfirm(false)
+      }
+    } else if (view === 'active') {
+      const res = await fetch('/api/admin?view=active')
       if (res.ok) {
         const d = await res.json()
         setRentals(d.rentals ?? [])
@@ -253,6 +294,63 @@ export default function AdminPage() {
     setSnapshotForm({ epochId: '', wallets: '' })
   }
 
+  const loadResetState = useCallback(async (wallet: string) => {
+    if (!wallet) return
+    const res = await fetch(`/api/admin?view=reset_state&walletAddress=${encodeURIComponent(wallet)}`)
+    if (res.ok) {
+      const d = await res.json()
+      setResetState(d)
+    }
+  }, [])
+
+  // Auto-load reset state when switching to reset view
+  useEffect(() => {
+    if (view === 'reset' && authed && connectedAddress) {
+      setResetWallet(connectedAddress)
+      loadResetState(connectedAddress)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, authed])
+
+  const handleReset = async (action: string) => {
+    setResetting(true)
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, walletAddress: resetWallet }),
+    })
+    const d = await res.json()
+    setResetting(false)
+    if (res.ok) {
+      setActionMsg(d.cleared !== undefined ? `Done — ${d.cleared} item(s) affected` : 'Done ✓')
+      setTimeout(() => setActionMsg(''), 3000)
+      setResetConfirm1(false)
+      setResetConfirm2(false)
+      loadResetState(resetWallet)
+    } else {
+      setActionMsg(d.error ?? 'Error')
+    }
+  }
+
+  const handleClearFullBoard = async () => {
+    setResetting(true)
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clear_full_board', confirm: fullBoardConfirm }),
+    })
+    const d = await res.json()
+    setResetting(false)
+    if (res.ok) {
+      setActionMsg(`Done — ${d.cleared} rental(s) expired`)
+      setTimeout(() => setActionMsg(''), 3000)
+      setFullBoardConfirm('')
+      if (resetWallet) loadResetState(resetWallet)
+    } else {
+      setActionMsg(d.error ?? 'Error')
+    }
+  }
+
   if (!authed) {
     // Step 1: no wallet connected
     if (!publicKey) {
@@ -335,7 +433,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['pending', 'active', 'billing', 'epochs', 'pricing', 'topups'] as AdminView[]).map((v) => (
+        {(['pending', 'active', 'billing', 'epochs', 'pricing', 'topups', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -350,7 +448,8 @@ export default function AdminPage() {
               : v === 'billing' ? 'Billing Runs'
               : v === 'epochs' ? 'Epochs'
               : v === 'pricing' ? 'Pricing Settings'
-              : 'Top-ups'}
+              : v === 'topups' ? 'Top-ups'
+              : 'Testing / Reset'}
           </button>
         ))}
       </div>
@@ -359,18 +458,192 @@ export default function AdminPage() {
         <div className="text-white/30 text-sm animate-pulse">Loading…</div>
       ) : (
         <>
-          {(view === 'pending' || view === 'active') && (
+          {view === 'pending' && (
+            <div className="space-y-3">
+              {pendingOrders.length === 0 ? (
+                <div className="text-white/30 text-sm text-center py-12">No pending ad orders.</div>
+              ) : (
+                <>
+                  {/* Bulk action bar */}
+                  <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 bg-white/3 border border-white/10 rounded-xl">
+                    <span className="text-xs text-white/50 flex-1 min-w-0">
+                      <span className="text-white font-medium">{pendingOrders.length}</span> pending order{pendingOrders.length !== 1 ? 's' : ''} covering{' '}
+                      <span className="text-white font-medium">{pendingOrders.reduce((s, o) => s + o.tileCount, 0)}</span> tiles
+                    </span>
+                    {approveAllConfirm ? (
+                      <>
+                        <span className="text-xs text-green-400/70">Approve all {pendingOrders.length} pending ad orders?</span>
+                        <button
+                          onClick={() => { act('approve_all_orders'); setApproveAllConfirm(false) }}
+                          className="text-xs bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 px-3 py-1.5 rounded transition-colors"
+                        >
+                          Confirm
+                        </button>
+                        <button onClick={() => setApproveAllConfirm(false)} className="text-xs text-white/40 hover:text-white transition-colors">
+                          Cancel
+                        </button>
+                      </>
+                    ) : rejectAllConfirm ? (
+                      <>
+                        <span className="text-xs text-red-400/70">Reject all {pendingOrders.length} pending ad orders?</span>
+                        <button
+                          onClick={() => { act('reject_all_orders'); setRejectAllConfirm(false) }}
+                          className="text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 px-3 py-1.5 rounded transition-colors"
+                        >
+                          Confirm
+                        </button>
+                        <button onClick={() => setRejectAllConfirm(false)} className="text-xs text-white/40 hover:text-white transition-colors">
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => setApproveAllConfirm(true)}
+                          className="text-xs bg-green-500/10 hover:bg-green-500/20 border border-green-500/20 text-green-400/80 px-3 py-1.5 rounded transition-colors"
+                        >
+                          Approve All Pending Orders
+                        </button>
+                        <button
+                          onClick={() => setRejectAllConfirm(true)}
+                          className="text-xs bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400/60 px-3 py-1.5 rounded transition-colors"
+                        >
+                          Reject All
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Order cards */}
+                  {pendingOrders.map((order) => (
+                    <div
+                      key={order.creativeId ?? order.rentalIds[0]}
+                      className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4"
+                    >
+                      {/* Image preview */}
+                      <div className="flex-shrink-0 flex flex-col items-center gap-1.5">
+                        {order.creative?.imageUrl ? (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={order.creative.imageUrl}
+                            alt={order.creative.altText ?? 'Ad'}
+                            className="w-24 h-24 object-cover rounded border border-white/10"
+                          />
+                        ) : (
+                          <div className="w-24 h-24 rounded border border-white/10 bg-white/5 flex items-center justify-center">
+                            <span className="text-white/20 text-[10px]">no image</span>
+                          </div>
+                        )}
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-amber-400/10 text-amber-400">
+                          PENDING
+                        </span>
+                      </div>
+
+                      {/* Order details */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            {/* Tile count + mode + rate */}
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <span className="text-white font-bold text-sm">
+                                {order.tileCount} tile{order.tileCount !== 1 ? 's' : ''}
+                              </span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                                order.creative?.displayMode === 'STRETCH'
+                                  ? 'bg-blue-400/10 text-blue-400'
+                                  : 'bg-white/5 text-white/30'
+                              }`}>
+                                {order.creative?.displayMode === 'STRETCH'
+                                  ? `Stretch ${order.blockCols}×${order.blockRows}`
+                                  : 'Repeat'}
+                              </span>
+                              <span className="text-white/30 text-[10px] font-mono">
+                                ${order.dailyRateTotal.toFixed(2)}/day
+                              </span>
+                            </div>
+
+                            {/* Display mode description */}
+                            <div className="text-[10px] text-white/30 mb-1.5">
+                              {order.creative?.displayMode === 'STRETCH'
+                                ? `Stretches across ${order.blockCols}×${order.blockRows} block`
+                                : `Repeats across ${order.tileCount} tile${order.tileCount !== 1 ? 's' : ''}`}
+                            </div>
+
+                            {/* Advertiser */}
+                            {order.user.walletAddress ? (
+                              <div className="text-green-400/70 text-xs font-mono truncate" title={order.user.walletAddress}>
+                                {order.user.walletAddress.slice(0, 6)}…{order.user.walletAddress.slice(-4)}
+                              </div>
+                            ) : null}
+                            {order.user.email ? (
+                              <div className="text-white/40 text-xs truncate">{order.user.email}</div>
+                            ) : !order.user.walletAddress ? (
+                              <div className="text-white/20 text-xs">unknown advertiser</div>
+                            ) : null}
+
+                            {/* Dest URL */}
+                            {order.creative?.destUrl && (
+                              <a
+                                href={order.creative.destUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-green-400 hover:text-green-300 truncate block max-w-xs mt-0.5"
+                              >
+                                {order.creative.destUrl}
+                              </a>
+                            )}
+
+                            {/* Image URL */}
+                            {order.creative?.imageUrl ? (
+                              <a
+                                href={order.creative.imageUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] text-white/20 hover:text-white/40 font-mono truncate block max-w-xs mt-0.5 transition-colors"
+                                title={order.creative.imageUrl}
+                              >
+                                {order.creative.imageUrl}
+                              </a>
+                            ) : (
+                              <div className="text-[10px] text-red-400/60 mt-0.5">⚠ no imageUrl</div>
+                            )}
+
+                            <div className="text-white/30 text-xs mt-1">
+                              {new Date(order.createdAt).toLocaleString()}
+                            </div>
+                          </div>
+
+                          {/* Action buttons */}
+                          <div className="flex flex-col gap-1.5 flex-shrink-0">
+                            <button
+                              onClick={() => act('approve_order', { creativeId: order.creativeId ?? '' })}
+                              className="bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
+                            >
+                              Approve Order
+                            </button>
+                            <button
+                              onClick={() => act('reject_order', { creativeId: order.creativeId ?? '' })}
+                              className="bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 text-xs px-3 py-1.5 rounded transition-colors"
+                            >
+                              Reject Order
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
+          {view === 'active' && (
             <div className="space-y-3">
               {rentals.length === 0 ? (
-                <div className="text-white/30 text-sm text-center py-12">
-                  {view === 'pending' ? 'No pending ads.' : 'No active rentals.'}
-                </div>
+                <div className="text-white/30 text-sm text-center py-12">No active rentals.</div>
               ) : (
                 rentals.map((r) => (
-                  <div
-                    key={r.id}
-                    className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4"
-                  >
+                  <div key={r.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4">
                     <div className="flex-shrink-0 flex flex-col items-center gap-1">
                       {r.creative?.imageUrl ? (
                         /* eslint-disable-next-line @next/next/no-img-element */
@@ -384,12 +657,8 @@ export default function AdminPage() {
                           <span className="text-white/20 text-[10px]">no image</span>
                         </div>
                       )}
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        r.status === 'ACTIVE'
-                          ? 'bg-green-400/10 text-green-400'
-                          : 'bg-amber-400/10 text-amber-400'
-                      }`}>
-                        {r.status === 'ACTIVE' ? 'LIVE' : 'PENDING'}
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-green-400/10 text-green-400">
+                        LIVE
                       </span>
                     </div>
                     <div className="flex-1 min-w-0">
@@ -442,31 +711,13 @@ export default function AdminPage() {
                             {new Date(r.createdAt).toLocaleString()}
                           </div>
                         </div>
-                        <div className="flex gap-2 flex-shrink-0">
-                          {view === 'pending' && (
-                            <>
-                              <button
-                                onClick={() => act('approve', { rentalId: r.id })}
-                                className="bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                onClick={() => act('reject', { rentalId: r.id })}
-                                className="bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 text-xs px-3 py-1.5 rounded transition-colors"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                          {view === 'active' && (
-                            <button
-                              onClick={() => act('expire', { rentalId: r.id })}
-                              className="bg-white/5 hover:bg-white/10 border border-white/20 text-white/60 text-xs px-3 py-1.5 rounded transition-colors"
-                            >
-                              Expire
-                            </button>
-                          )}
+                        <div className="flex-shrink-0">
+                          <button
+                            onClick={() => act('expire', { rentalId: r.id })}
+                            className="bg-white/5 hover:bg-white/10 border border-white/20 text-white/60 text-xs px-3 py-1.5 rounded transition-colors"
+                          >
+                            Expire
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -827,6 +1078,169 @@ export default function AdminPage() {
                   {pricingSaving ? 'Saving…' : 'Save pricing settings'}
                 </button>
               </form>
+            </div>
+          )}
+
+          {view === 'reset' && (
+            <div className="space-y-5 max-w-2xl">
+
+              {/* Target wallet selector */}
+              <div className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                <h3 className="text-sm font-bold text-white">Target Account</h3>
+                <div className="flex gap-2">
+                  <input
+                    value={resetWallet}
+                    onChange={(e) => { setResetWallet(e.target.value); setResetState(null) }}
+                    placeholder="Wallet address"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400 placeholder-white/20"
+                  />
+                  <button
+                    onClick={() => loadResetState(resetWallet)}
+                    disabled={!resetWallet || resetting}
+                    className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-lg transition-colors disabled:opacity-40"
+                  >
+                    Load
+                  </button>
+                </div>
+                {connectedAddress && connectedAddress !== resetWallet && (
+                  <button
+                    onClick={() => { setResetWallet(connectedAddress); loadResetState(connectedAddress) }}
+                    className="text-[10px] text-amber-400/70 hover:text-amber-400 transition-colors"
+                  >
+                    Use connected wallet ({connectedAddress.slice(0, 6)}…{connectedAddress.slice(-4)})
+                  </button>
+                )}
+              </div>
+
+              {/* Current state */}
+              {resetState && (
+                <div className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white">Current State</h3>
+                    <button
+                      onClick={() => loadResetState(resetWallet)}
+                      className="text-[10px] text-white/30 hover:text-white transition-colors"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  {resetState.userId ? (
+                    <>
+                      <div className="text-[10px] text-white/30 font-mono truncate">{resetWallet}</div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {[
+                          { label: 'Balance', value: `$${resetState.balance.toFixed(2)}`, hi: resetState.balance > 0 ? 'text-green-400' : 'text-white' },
+                          { label: 'Pending topups', value: resetState.pendingTopups, hi: resetState.pendingTopups > 0 ? 'text-amber-400' : 'text-white' },
+                          { label: 'Confirmed topups', value: resetState.confirmedTopups, hi: 'text-white' },
+                          { label: 'Active rentals', value: resetState.activeRentals, hi: resetState.activeRentals > 0 ? 'text-green-400' : 'text-white' },
+                          { label: 'Pending rentals', value: resetState.pendingRentals, hi: resetState.pendingRentals > 0 ? 'text-amber-400' : 'text-white' },
+                          { label: 'Rented tiles', value: resetState.activeRentals + resetState.pendingRentals, hi: 'text-white' },
+                        ].map(({ label, value, hi }) => (
+                          <div key={label} className="bg-white/3 rounded-lg p-2.5">
+                            <div className="text-[10px] text-white/40 mb-1">{label}</div>
+                            <div className={`text-sm font-mono font-bold ${hi}`}>{value}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-white/30 text-sm">No user found for this wallet address.</p>
+                  )}
+                </div>
+              )}
+
+              {/* Action 1: Reset advertiser test account */}
+              {resetState?.userId && (
+                <div className="border border-amber-500/20 rounded-xl p-4 space-y-3">
+                  <h3 className="text-sm font-bold text-amber-400">Reset Advertiser Test Account</h3>
+                  <p className="text-white/40 text-xs">
+                    This will reset test balance and expire pending test topups. Confirmed on-chain topups remain in history and are not deleted.
+                  </p>
+                  {resetConfirm1 ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleReset('reset_test_account')}
+                        disabled={resetting}
+                        className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-4 py-1.5 rounded transition-colors disabled:opacity-50"
+                      >
+                        {resetting ? 'Resetting…' : 'Confirm — reset balance & topups'}
+                      </button>
+                      <button
+                        onClick={() => setResetConfirm1(false)}
+                        className="text-xs text-white/40 hover:text-white transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setResetConfirm1(true)}
+                      className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/70 px-4 py-1.5 rounded transition-colors"
+                    >
+                      Reset my advertiser test account
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Action 2: Clear test rentals */}
+              {resetState?.userId && (
+                <div className="border border-amber-500/20 rounded-xl p-4 space-y-3">
+                  <h3 className="text-sm font-bold text-amber-400">Clear Test Rentals</h3>
+                  <p className="text-white/40 text-xs">
+                    Expires all active and pending rentals for this wallet. Tiles are freed. Database history is preserved.
+                  </p>
+                  {resetConfirm2 ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleReset('clear_test_rentals')}
+                        disabled={resetting}
+                        className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-4 py-1.5 rounded transition-colors disabled:opacity-50"
+                      >
+                        {resetting ? 'Clearing…' : `Confirm — expire ${resetState.activeRentals + resetState.pendingRentals} rental(s)`}
+                      </button>
+                      <button
+                        onClick={() => setResetConfirm2(false)}
+                        className="text-xs text-white/40 hover:text-white transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setResetConfirm2(true)}
+                      disabled={(resetState.activeRentals + resetState.pendingRentals) === 0}
+                      className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/70 px-4 py-1.5 rounded transition-colors disabled:opacity-40"
+                    >
+                      Clear test rentals
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Action 3: Clear full board — dangerous */}
+              <div className="border border-red-500/30 rounded-xl p-4 space-y-3">
+                <h3 className="text-sm font-bold text-red-400">Clear Full Board Test Data</h3>
+                <p className="text-red-400/60 text-xs">
+                  Dangerous: expires ALL active and pending rentals across every advertiser board-wide. Revenue and topup history is preserved.
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={fullBoardConfirm}
+                    onChange={(e) => setFullBoardConfirm(e.target.value)}
+                    placeholder="Type CONFIRM to enable"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-white text-xs focus:outline-none focus:border-red-400 placeholder-white/20"
+                  />
+                  <button
+                    onClick={handleClearFullBoard}
+                    disabled={fullBoardConfirm !== 'CONFIRM' || resetting}
+                    className="text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 px-4 py-1.5 rounded transition-colors disabled:opacity-40"
+                  >
+                    {resetting ? 'Clearing…' : 'Clear full board'}
+                  </button>
+                </div>
+              </div>
+
             </div>
           )}
         </>

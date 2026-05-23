@@ -19,7 +19,8 @@ export async function GET(req: Request) {
   const view = searchParams.get('view') ?? 'pending'
 
   if (view === 'pending') {
-    const rentals = await prisma.adRental.findMany({
+    const BOARD_COLS = 400
+    const allRentals = await prisma.adRental.findMany({
       where: { status: 'PENDING_APPROVAL' },
       include: {
         creative: true,
@@ -27,7 +28,57 @@ export async function GET(req: Request) {
       },
       orderBy: { createdAt: 'asc' },
     })
-    return NextResponse.json({ rentals })
+
+    type OrderAcc = {
+      creativeId: string | null
+      userId: string
+      tileIds: number[]
+      rentalIds: string[]
+      status: string
+      createdAt: Date
+      dailyRateTotal: number
+      creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
+      user: { email: string | null; walletAddress: string | null }
+    }
+
+    const orderMap = new Map<string, OrderAcc>()
+    for (const rental of allRentals) {
+      const key = rental.creativeId ?? `solo-${rental.id}`
+      if (!orderMap.has(key)) {
+        orderMap.set(key, {
+          creativeId: rental.creativeId,
+          userId: rental.userId,
+          tileIds: [],
+          rentalIds: [],
+          status: rental.status,
+          createdAt: rental.createdAt,
+          dailyRateTotal: 0,
+          creative: rental.creative
+            ? { imageUrl: rental.creative.imageUrl, destUrl: rental.creative.destUrl,
+                altText: rental.creative.altText, displayMode: rental.creative.displayMode }
+            : null,
+          user: { email: rental.user.email ?? null, walletAddress: rental.user.walletAddress ?? null },
+        })
+      }
+      const o = orderMap.get(key)!
+      o.tileIds.push(rental.tileId)
+      o.rentalIds.push(rental.id)
+      o.dailyRateTotal += Number(rental.dailyRate)
+    }
+
+    const orders = Array.from(orderMap.values()).map((o) => {
+      let blockCols: number | undefined
+      let blockRows: number | undefined
+      if (o.creative?.displayMode === 'STRETCH' && o.tileIds.length > 1) {
+        const cs = o.tileIds.map((id) => id % BOARD_COLS)
+        const rs = o.tileIds.map((id) => Math.floor(id / BOARD_COLS))
+        blockCols = Math.max(...cs) - Math.min(...cs) + 1
+        blockRows = Math.max(...rs) - Math.min(...rs) + 1
+      }
+      return { ...o, tileCount: o.tileIds.length, blockCols, blockRows }
+    })
+
+    return NextResponse.json({ orders })
   }
 
   if (view === 'active') {
@@ -35,7 +86,7 @@ export async function GET(req: Request) {
       where: { status: 'ACTIVE' },
       include: {
         creative: true,
-        user: { select: { email: true } },
+        user: { select: { email: true, walletAddress: true } },
       },
       orderBy: { startDate: 'desc' },
     })
@@ -81,6 +132,35 @@ export async function GET(req: Request) {
     return NextResponse.json({ pending, confirmed, unmatched })
   }
 
+  if (view === 'reset_state') {
+    const walletAddress = searchParams.get('walletAddress')
+    if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
+
+    const user = await prisma.user.findFirst({ where: { walletAddress }, select: { id: true } })
+    if (!user) {
+      return NextResponse.json({
+        userId: null, balance: 0, pendingTopups: 0, confirmedTopups: 0, activeRentals: 0, pendingRentals: 0,
+      })
+    }
+
+    const [wallet, pendingTopups, confirmedTopups, activeRentals, pendingRentals] = await Promise.all([
+      prisma.advertiserWallet.findUnique({ where: { userId: user.id }, select: { usdcBalance: true } }),
+      prisma.topup.count({ where: { userId: user.id, status: 'PENDING' } }),
+      prisma.topup.count({ where: { userId: user.id, status: 'CONFIRMED' } }),
+      prisma.adRental.count({ where: { userId: user.id, status: 'ACTIVE' } }),
+      prisma.adRental.count({ where: { userId: user.id, status: 'PENDING_APPROVAL' } }),
+    ])
+
+    return NextResponse.json({
+      userId: user.id,
+      balance: wallet ? Number(wallet.usdcBalance) : 0,
+      pendingTopups,
+      confirmedTopups,
+      activeRentals,
+      pendingRentals,
+    })
+  }
+
   return NextResponse.json({ error: 'Unknown view' }, { status: 400 })
 }
 
@@ -91,22 +171,40 @@ export async function POST(req: Request) {
   const body = await req.json()
   const { action } = body
 
-  if (action === 'approve') {
-    const { rentalId } = body
-    await prisma.adRental.update({
-      where: { id: rentalId },
+  if (action === 'approve_order') {
+    const { creativeId } = body
+    if (!creativeId) return NextResponse.json({ error: 'creativeId required' }, { status: 400 })
+    await prisma.adRental.updateMany({
+      where: { creativeId, status: 'PENDING_APPROVAL' },
       data: { status: 'ACTIVE', startDate: new Date() },
     })
     return NextResponse.json({ ok: true })
   }
 
-  if (action === 'reject') {
-    const { rentalId } = body
-    await prisma.adRental.update({
-      where: { id: rentalId },
+  if (action === 'reject_order') {
+    const { creativeId } = body
+    if (!creativeId) return NextResponse.json({ error: 'creativeId required' }, { status: 400 })
+    await prisma.adRental.updateMany({
+      where: { creativeId, status: 'PENDING_APPROVAL' },
       data: { status: 'REJECTED' },
     })
     return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'approve_all_orders') {
+    const result = await prisma.adRental.updateMany({
+      where: { status: 'PENDING_APPROVAL' },
+      data: { status: 'ACTIVE', startDate: new Date() },
+    })
+    return NextResponse.json({ ok: true, count: result.count })
+  }
+
+  if (action === 'reject_all_orders') {
+    const result = await prisma.adRental.updateMany({
+      where: { status: 'PENDING_APPROVAL' },
+      data: { status: 'REJECTED' },
+    })
+    return NextResponse.json({ ok: true, count: result.count })
   }
 
   if (action === 'expire') {
@@ -233,6 +331,64 @@ export async function POST(req: Request) {
     )
     const d = await res.json()
     return NextResponse.json(d)
+  }
+
+  if (action === 'reset_test_account') {
+    const { walletAddress } = body
+    if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
+
+    const user = await prisma.user.findFirst({ where: { walletAddress }, select: { id: true } })
+    if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+
+    await prisma.$transaction([
+      // Zero the balance
+      prisma.advertiserWallet.upsert({
+        where: { userId: user.id },
+        update: { usdcBalance: 0 },
+        create: { userId: user.id, usdcBalance: 0 },
+      }),
+      // Expire all pending real topups
+      prisma.topup.updateMany({
+        where: { userId: user.id, method: 'usdc_solana', status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      }),
+      // Reject non-terminal mock topups (CONFIRMED mock topups stay as history)
+      prisma.topup.updateMany({
+        where: { userId: user.id, method: 'mock', status: { notIn: ['CONFIRMED', 'REJECTED', 'FAILED'] } },
+        data: { status: 'REJECTED' },
+      }),
+    ])
+
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'clear_test_rentals') {
+    const { walletAddress } = body
+    if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
+
+    const user = await prisma.user.findFirst({ where: { walletAddress }, select: { id: true } })
+    if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+
+    const result = await prisma.adRental.updateMany({
+      where: { userId: user.id, status: { in: ['ACTIVE', 'PENDING_APPROVAL'] } },
+      data: { status: 'EXPIRED', endDate: new Date() },
+    })
+
+    return NextResponse.json({ ok: true, cleared: result.count })
+  }
+
+  if (action === 'clear_full_board') {
+    const { confirm } = body
+    if (confirm !== 'CONFIRM') {
+      return NextResponse.json({ error: 'Type CONFIRM to proceed' }, { status: 400 })
+    }
+
+    const result = await prisma.adRental.updateMany({
+      where: { status: { in: ['ACTIVE', 'PENDING_APPROVAL'] } },
+      data: { status: 'EXPIRED', endDate: new Date() },
+    })
+
+    return NextResponse.json({ ok: true, cleared: result.count })
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

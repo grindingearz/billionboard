@@ -137,6 +137,26 @@ export default function Billboard({
       }
     }
 
+    // Glow pass for ACTIVE tile clusters — single batched path for performance
+    {
+      ctx.save()
+      ctx.shadowColor = 'rgba(74, 222, 128, 0.9)'
+      ctx.shadowBlur = pixelSize * 6
+      ctx.fillStyle = 'rgba(74, 222, 128, 0.15)'
+      ctx.beginPath()
+      let hasActive = false
+      for (const [tileIdStr, info] of Object.entries(tiles)) {
+        if (info.status !== 'ACTIVE') continue
+        hasActive = true
+        const tid = Number(tileIdStr)
+        const c = tid % BOARD_COLUMNS
+        const r = Math.floor(tid / BOARD_COLUMNS)
+        ctx.rect(c * pixelSize, r * pixelSize, tileW, tileH)
+      }
+      if (hasActive) ctx.fill()
+      ctx.restore()
+    }
+
     // Draw creative images grouped by creativeId
     // STRETCH: one image across bounding box; REPEAT: image per tile
     type Group = {

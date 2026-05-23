@@ -3,13 +3,12 @@
 import { useRef, useEffect } from 'react'
 import {
   BOARD_COLUMNS,
-  BOARD_ROWS,
   type TileStatus,
   type TileInfoMap,
 } from '@/lib/types'
 
-const LOUPE_SIZE = 192
-const LOUPE_ZOOM = 4
+const LOUPE_SIZE = 320
+const LOUPE_ZOOM = 8
 
 interface LoupeProps {
   sourceCanvas: HTMLCanvasElement | null
@@ -24,6 +23,7 @@ interface LoupeProps {
   viewportY: number
   containerRect: DOMRect | null
   tilePrice?: number
+  tileCount?: number
 }
 
 export default function Loupe({
@@ -39,6 +39,7 @@ export default function Loupe({
   viewportY,
   containerRect,
   tilePrice = 1,
+  tileCount = 1,
 }: LoupeProps) {
   const loupeRef = useRef<HTMLCanvasElement>(null)
 
@@ -107,7 +108,7 @@ export default function Loupe({
 
   const OFFSET = 24
   const PANEL_W = LOUPE_SIZE + 8
-  const PANEL_H = LOUPE_SIZE + 90
+  const PANEL_H = LOUPE_SIZE + 140
 
   let left = viewportX + OFFSET
   let top = viewportY - LOUPE_SIZE / 2
@@ -150,7 +151,7 @@ export default function Loupe({
         style={{ width: LOUPE_SIZE, height: LOUPE_SIZE, imageRendering: 'pixelated', background: '#141414' }}
       />
 
-      <div className="mt-2 bg-black/90 border border-white/10 rounded-lg px-3 py-2 text-xs min-w-[160px]">
+      <div className="mt-2 bg-black/90 border border-white/10 rounded-lg px-3 py-2 text-xs" style={{ minWidth: 200 }}>
         <div className="flex justify-between items-center mb-1">
           <span className="text-white/40">Tile #{tileId}</span>
           <span className={`font-medium ${statusColor}`}>{statusLabel}</span>
@@ -166,6 +167,17 @@ export default function Loupe({
             {info.destUrl.replace(/^https?:\/\//, '')}
           </div>
         )}
+        {status === 'ACTIVE' && (tileCount > 1 || info?.displayMode) && (
+          <div className="flex items-center gap-1.5 text-[10px] text-white/35 mb-1">
+            <span>{tileCount} tile{tileCount !== 1 ? 's' : ''}</span>
+            {info?.displayMode && (
+              <>
+                <span>·</span>
+                <span>{info.displayMode}</span>
+              </>
+            )}
+          </div>
+        )}
         <div className={`font-mono font-bold ${isTaken ? 'text-white/20 line-through' : 'text-green-400'}`}>
           {priceLabel}
         </div>
@@ -173,7 +185,7 @@ export default function Loupe({
           <div className="text-red-400/80 text-[10px] mt-0.5">Not available</div>
         )}
         {status === 'ACTIVE' && info?.destUrl && (
-          <div className="text-green-400/60 text-[10px] mt-0.5">Click to visit →</div>
+          <div className="mt-1.5 text-green-400 text-[11px] font-medium">Click to visit →</div>
         )}
       </div>
     </div>
