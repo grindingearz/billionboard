@@ -1186,6 +1186,64 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, cleared: result.count })
   }
 
+  if (action === 'full_prelaunch_reset') {
+    const { confirm } = body
+    if (confirm !== 'RESET BILLIONBOARD') {
+      return NextResponse.json({ error: 'Type RESET BILLIONBOARD to confirm' }, { status: 400 })
+    }
+
+    // Delete in FK-safe order: children first, parents last.
+    // Never touches: User, Setting, ExcludedWallet, AdvertiserWallet records.
+    const [
+      settlements,
+      billingItems,
+      revenueEvents,
+      claims,
+      holderSnapshots,
+      epochs,
+      billingRuns,
+      rentals,
+      creatives,
+      topups,
+      processedTxs,
+    ] = await prisma.$transaction([
+      prisma.revenueSettlement.deleteMany({}),
+      prisma.billingItem.deleteMany({}),
+      prisma.revenueEvent.deleteMany({}),
+      prisma.claim.deleteMany({}),
+      prisma.holderSnapshot.deleteMany({}),
+      prisma.distributionEpoch.deleteMany({}),
+      prisma.dailyBillingRun.deleteMany({}),
+      prisma.adRental.deleteMany({}),
+      prisma.adCreative.deleteMany({}),
+      prisma.topup.deleteMany({}),
+      prisma.processedTransaction.deleteMany({}),
+    ])
+
+    // Zero all advertiser balances (keep the wallet records so users can log back in)
+    const usersReset = await prisma.advertiserWallet.updateMany({
+      data: { usdcBalance: 0 },
+    })
+
+    return NextResponse.json({
+      ok: true,
+      summary: {
+        settlements: settlements.count,
+        billingItems: billingItems.count,
+        revenueEvents: revenueEvents.count,
+        claims: claims.count,
+        holderSnapshots: holderSnapshots.count,
+        epochs: epochs.count,
+        billingRuns: billingRuns.count,
+        rentals: rentals.count,
+        creatives: creatives.count,
+        topups: topups.count,
+        processedTxs: processedTxs.count,
+        usersBalancesZeroed: usersReset.count,
+      },
+    })
+  }
+
   // ── Settlement actions ──────────────────────────────────────────────────────
 
   if (action === 'retry_settlement') {

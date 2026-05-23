@@ -388,6 +388,13 @@ export default function AdminPage() {
   const [accountingSubview, setAccountingSubview] = useState<'cards' | 'events'>('cards')
   const [repairing, setRepairing] = useState(false)
   const [repairMsg, setRepairMsg] = useState('')
+  const [prelaunchConfirm, setPrelaunchConfirm] = useState('')
+  const [prelaunchRunning, setPrelaunchRunning] = useState(false)
+  const [prelaunchResult, setPrelaunchResult] = useState<{
+    settlements: number; billingItems: number; revenueEvents: number; claims: number
+    holderSnapshots: number; epochs: number; billingRuns: number; rentals: number
+    creatives: number; topups: number; processedTxs: number; usersBalancesZeroed: number
+  } | null>(null)
 
   // Hydration guard
   useEffect(() => { setMounted(true) }, [])
@@ -2898,6 +2905,99 @@ export default function AdminPage() {
                     {resetting ? 'Clearing…' : 'Clear full board'}
                   </button>
                 </div>
+              </div>
+
+              {/* Action 4: Full Prelaunch Reset — nuclear */}
+              <div className="border-2 border-red-600/50 rounded-xl p-5 space-y-4 bg-red-950/20">
+                <div className="space-y-1">
+                  <h3 className="text-base font-black text-red-400 tracking-tight">Full Prelaunch Reset</h3>
+                  <p className="text-red-300/60 text-xs leading-relaxed">
+                    Deletes ALL test data — rentals, creatives, topups, billing runs, revenue events, settlements, epochs, claims, snapshots, processed transactions — and zeros every advertiser balance.
+                    Settings, wallet config, excluded wallets, and env vars are untouched.
+                    <span className="block mt-1 text-red-400/80 font-semibold">This cannot be undone.</span>
+                  </p>
+                  <div className="text-[10px] text-white/30 pt-1 space-y-0.5">
+                    <div>Preserved: Settings table · ExcludedWallets · User records · Wallet env config · R2 config · Helius config</div>
+                    <div>Cleared: Rentals · Creatives · Topups · Revenue events · Settlements · Billing runs · Epochs · Claims · Snapshots · Processed txs · Advertiser balances → $0</div>
+                  </div>
+                </div>
+
+                {prelaunchResult ? (
+                  <div className="border border-green-500/30 rounded-lg p-4 bg-green-950/20 space-y-3">
+                    <div className="text-green-400 font-bold text-sm">Reset complete ✓</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                      {[
+                        { label: 'Rentals deleted', value: prelaunchResult.rentals },
+                        { label: 'Creatives deleted', value: prelaunchResult.creatives },
+                        { label: 'Topups deleted', value: prelaunchResult.topups },
+                        { label: 'Revenue events deleted', value: prelaunchResult.revenueEvents },
+                        { label: 'Settlements deleted', value: prelaunchResult.settlements },
+                        { label: 'Billing items deleted', value: prelaunchResult.billingItems },
+                        { label: 'Billing runs deleted', value: prelaunchResult.billingRuns },
+                        { label: 'Epochs deleted', value: prelaunchResult.epochs },
+                        { label: 'Claims deleted', value: prelaunchResult.claims },
+                        { label: 'Snapshots deleted', value: prelaunchResult.holderSnapshots },
+                        { label: 'Processed txs deleted', value: prelaunchResult.processedTxs },
+                        { label: 'Balances zeroed', value: prelaunchResult.usersBalancesZeroed },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="bg-white/5 rounded px-2 py-1.5">
+                          <div className="font-mono font-bold text-white">{value}</div>
+                          <div className="text-white/40 text-[10px]">{label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => { setPrelaunchResult(null); setPrelaunchConfirm('') }}
+                      className="text-xs text-white/30 hover:text-white transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="text-xs text-red-300/70">
+                      Type <span className="font-mono font-bold text-red-300">RESET BILLIONBOARD</span> to enable:
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={prelaunchConfirm}
+                        onChange={(e) => setPrelaunchConfirm(e.target.value)}
+                        placeholder="RESET BILLIONBOARD"
+                        className="flex-1 bg-black/30 border border-red-600/40 rounded-lg px-3 py-2 text-red-300 text-xs font-mono focus:outline-none focus:border-red-400 placeholder-red-900"
+                      />
+                      <button
+                        disabled={prelaunchConfirm !== 'RESET BILLIONBOARD' || prelaunchRunning}
+                        onClick={async () => {
+                          setPrelaunchRunning(true)
+                          try {
+                            const res = await fetch('/api/admin', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ action: 'full_prelaunch_reset', confirm: prelaunchConfirm }),
+                            })
+                            const d = await res.json()
+                            if (res.ok && d.ok) {
+                              setPrelaunchResult(d.summary)
+                              setPrelaunchConfirm('')
+                              load()
+                            } else {
+                              setActionMsg(`Reset failed: ${d.error ?? 'Unknown error'}`)
+                              setTimeout(() => setActionMsg(''), 6000)
+                            }
+                          } catch {
+                            setActionMsg('Network error during reset')
+                            setTimeout(() => setActionMsg(''), 6000)
+                          } finally {
+                            setPrelaunchRunning(false)
+                          }
+                        }}
+                        className="text-xs bg-red-600/30 hover:bg-red-600/50 border border-red-600/60 text-red-300 px-4 py-2 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed font-semibold whitespace-nowrap"
+                      >
+                        {prelaunchRunning ? 'Resetting…' : 'Full Prelaunch Reset'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
             </div>
