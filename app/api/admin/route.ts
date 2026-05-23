@@ -8,6 +8,7 @@ import { fetchTokenHolders } from '@/lib/helius'
 import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc, utcDayStart } from '@/lib/epoch'
 import { verifyAndProcessSignature } from '@/lib/usdc-topup'
 import { settleRevenueEvent, dryRunSettlement } from '@/lib/settlement'
+import { fetchWalletUsdcBalances } from '@/lib/wallet-balances'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -192,8 +193,18 @@ export async function GET(req: Request) {
     const typeFilter = searchParams.get('type')
     const events = await prisma.revenueEvent.findMany({
       where: typeFilter ? { type: typeFilter as never } : undefined,
+      include: {
+        settlement: {
+          select: {
+            settlementStatus: true,
+            moveToRevenueTxSignature: true,
+            treasuryTxSignature: true,
+            distributionTxSignature: true,
+          },
+        },
+      },
       orderBy: { createdAt: 'desc' },
-      take: 100,
+      take: 200,
     })
     return NextResponse.json({ events })
   }
@@ -279,6 +290,32 @@ export async function GET(req: Request) {
       orderBy: { createdAt: 'desc' },
       take: 100,
     })
+
+    // Enrich with topup breakdown and active burn
+    const userIds = users.map((u) => u.id)
+    const [realTopups, mockTopups, activeRentalRates] = await Promise.all([
+      prisma.topup.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds }, status: 'CONFIRMED', method: 'usdc_solana', txSignature: { not: null } },
+        _sum: { actualAmount: true },
+      }),
+      prisma.topup.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds }, status: 'CONFIRMED', method: 'mock' },
+        _sum: { actualAmount: true },
+      }),
+      prisma.adRental.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds }, status: 'ACTIVE' },
+        _sum: { dailyRate: true },
+        _count: { _all: true },
+      }),
+    ])
+
+    const realTopupMap = new Map(realTopups.map((r) => [r.userId, Number(r._sum.actualAmount ?? 0)]))
+    const mockTopupMap = new Map(mockTopups.map((r) => [r.userId, Number(r._sum.actualAmount ?? 0)]))
+    const burnMap = new Map(activeRentalRates.map((r) => [r.userId, { daily: Number(r._sum.dailyRate ?? 0), tiles: r._count._all }]))
+
     return NextResponse.json({
       users: users.map((u) => ({
         id: u.id,
@@ -288,6 +325,10 @@ export async function GET(req: Request) {
         rentalCount: u._count.adRentals,
         topupCount: u._count.topups,
         createdAt: u.createdAt,
+        confirmedRealTopups: realTopupMap.get(u.id) ?? 0,
+        mockTopups: mockTopupMap.get(u.id) ?? 0,
+        activeDailyBurn: burnMap.get(u.id)?.daily ?? 0,
+        activeTiles: burnMap.get(u.id)?.tiles ?? 0,
       })),
     })
   }
@@ -319,6 +360,11 @@ export async function GET(req: Request) {
       pendingCount,
       treasurySent,
       distributionSent,
+      confirmedTopupsTotal,
+      mockTopupsTotal,
+      activeDailyRateAgg,
+      activeTileCount,
+      earnedNotYetMoved,
     ] = await Promise.all([
       prisma.advertiserWallet.aggregate({ _sum: { usdcBalance: true } }),
       prisma.revenueEvent.aggregate({
@@ -347,6 +393,26 @@ export async function GET(req: Request) {
         where: { settlementStatus: 'SETTLED' },
         _sum: { distributionAmount: true },
       }),
+      // Real on-chain topups (have txSignature, not mock)
+      prisma.topup.aggregate({
+        where: { status: 'CONFIRMED', method: 'usdc_solana', txSignature: { not: null } },
+        _sum: { actualAmount: true },
+      }),
+      // Mock/admin topups
+      prisma.topup.aggregate({
+        where: { status: 'CONFIRMED', method: 'mock' },
+        _sum: { actualAmount: true },
+      }),
+      // Active rental daily burn rate
+      prisma.adRental.aggregate({ where: { status: 'ACTIVE' }, _sum: { dailyRate: true } }),
+      prisma.adRental.count({ where: { status: 'ACTIVE' } }),
+      // Earned ad revenue not yet moved to revenue wallet (UNSETTLED or pending first leg)
+      prisma.revenueSettlement.aggregate({
+        where: {
+          settlementStatus: { in: ['UNSETTLED', 'FAILED', 'PARTIAL'] },
+        },
+        _sum: { amount: true },
+      }),
     ])
 
     const walletConfig = {
@@ -361,8 +427,27 @@ export async function GET(req: Request) {
       feeCreatorWalletKeyConfigured: !!env.feeCreatorWalletPrivateKey,
     }
 
+    // Fetch on-chain USDC balance for top-up wallet (for reconciliation)
+    let topupWalletOnChain: number | null = null
+    if (env.topupWallet) {
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Timeout')), 6000)
+        )
+        const balances = await Promise.race([fetchWalletUsdcBalances(), timeoutPromise])
+        topupWalletOnChain = balances.topupWallet.balance
+      } catch {
+        // leave null
+      }
+    }
+
+    const unusedAdvertiserBalancesNum = Number(unusedBalances._sum.usdcBalance ?? 0)
+    const earnedNotMovedNum = Number(earnedNotYetMoved._sum.amount ?? 0)
+    // Expected top-up wallet = unused advertiser prepaid balances + earned but not yet moved to revenue wallet
+    const expectedTopupWalletBalance = unusedAdvertiserBalancesNum + earnedNotMovedNum
+
     return NextResponse.json({
-      unusedAdvertiserBalances: Number(unusedBalances._sum.usdcBalance ?? 0),
+      unusedAdvertiserBalances: unusedAdvertiserBalancesNum,
       earnedAdFees: Number(earnedAdFees._sum.amount ?? 0),
       earnedTradingFees: Number(earnedTradingFees._sum.amount ?? 0),
       totalSettled: Number(settledTotal._sum.amount ?? 0),
@@ -372,6 +457,111 @@ export async function GET(req: Request) {
       distributionSent: Number(distributionSent._sum.distributionAmount ?? 0),
       walletConfig,
       today: today.toISOString(),
+      // Reconciliation data
+      reconciliation: {
+        confirmedOnChainTopups: Number(confirmedTopupsTotal._sum.actualAmount ?? 0),
+        mockTopups: Number(mockTopupsTotal._sum.actualAmount ?? 0),
+        activeDailyBurn: Number(activeDailyRateAgg._sum.dailyRate ?? 0),
+        activeTileCount,
+        earnedNotYetMoved: earnedNotMovedNum,
+        expectedTopupWalletBalance,
+        topupWalletOnChain,
+        variance: topupWalletOnChain !== null ? topupWalletOnChain - expectedTopupWalletBalance : null,
+      },
+    })
+  }
+
+  if (view === 'summary') {
+    const TOTAL_TILES = 100000
+    const today = utcDayStart(new Date())
+
+    const [
+      tilePrice,
+      freeEnabled,
+      feePercentStr,
+      activeTileCount,
+      pendingTileCount,
+      activeDailyRateAgg,
+      activeAdsDistinct,
+      activeAdvertisersDistinct,
+      epochRevenue,
+      settledTreasury,
+      settledDistribution,
+      pendingSettlementAgg,
+      failedSettlementAgg,
+      pendingSettlementCount,
+      failedSettlementCount,
+    ] = await Promise.all([
+      getTilePrice(),
+      isFreeRentalEnabled(),
+      getSetting('management_fee_percent'),
+      prisma.adRental.count({ where: { status: 'ACTIVE' } }),
+      prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
+      prisma.adRental.aggregate({ where: { status: 'ACTIVE' }, _sum: { dailyRate: true } }),
+      prisma.adRental.findMany({ where: { status: 'ACTIVE' }, select: { creativeId: true }, distinct: ['creativeId'] }),
+      prisma.adRental.findMany({ where: { status: 'ACTIVE' }, select: { userId: true }, distinct: ['userId'] }),
+      getGrossRevenueForDate(today),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { treasuryAmount: true } }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { distributionAmount: true } }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: { in: ['UNSETTLED', 'MOVING_TO_REVENUE', 'MOVED_TO_REVENUE', 'SPLITTING', 'PARTIAL'] } },
+        _sum: { amount: true },
+      }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'FAILED' }, _sum: { amount: true } }),
+      prisma.revenueSettlement.count({
+        where: { settlementStatus: { in: ['UNSETTLED', 'MOVING_TO_REVENUE', 'MOVED_TO_REVENUE', 'SPLITTING', 'PARTIAL'] } },
+      }),
+      prisma.revenueSettlement.count({ where: { settlementStatus: 'FAILED' } }),
+    ])
+
+    const feePercent = parseFloat(feePercentStr)
+    const { adRevenue, tradingFeeRevenue, grossPool } = epochRevenue
+    const treasuryFeesGenerated = (grossPool * feePercent) / 100
+    const distributionPoolGenerated = grossPool - treasuryFeesGenerated
+
+    // Fetch on-chain USDC balances — best-effort with timeout
+    let walletBalances = null
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout')), 8000)
+      )
+      walletBalances = await Promise.race([fetchWalletUsdcBalances(), timeoutPromise])
+    } catch {
+      // balances unavailable — frontend shows "Unavailable"
+    }
+
+    return NextResponse.json({
+      walletBalances,
+      board: {
+        totalTiles: TOTAL_TILES,
+        activeTiles: activeTileCount,
+        availableTiles: TOTAL_TILES - activeTileCount - pendingTileCount,
+        pendingTiles: pendingTileCount,
+        activeAds: activeAdsDistinct.length,
+        activeAdvertisers: activeAdvertisersDistinct.length,
+      },
+      currentBurn: {
+        dailyIncome: Number(activeDailyRateAgg._sum.dailyRate ?? 0),
+        tilePrice,
+        freeEnabled,
+      },
+      epoch: {
+        date: today.toISOString(),
+        advertisingFeesEarned: adRevenue,
+        tradingFeesEarned: tradingFeeRevenue,
+        grossFees: grossPool,
+        treasuryFeesGenerated,
+        distributionPoolGenerated,
+        feePercent,
+      },
+      settlement: {
+        settledToTreasury: Number(settledTreasury._sum.treasuryAmount ?? 0),
+        settledToDistribution: Number(settledDistribution._sum.distributionAmount ?? 0),
+        pendingSettlement: Number(pendingSettlementAgg._sum.amount ?? 0),
+        failedSettlement: Number(failedSettlementAgg._sum.amount ?? 0),
+        pendingCount: pendingSettlementCount,
+        failedCount: failedSettlementCount,
+      },
     })
   }
 
@@ -999,6 +1189,260 @@ export async function POST(req: Request) {
       created.push(addr)
     }
     return NextResponse.json({ ok: true, seeded: created.length, wallets: created })
+  }
+
+  // ── Accounting repair tools ─────────────────────────────────────────────────
+
+  if (action === 'set_wallet_balance') {
+    // Manually set an advertiser's internal balance (requires reason, creates audit event)
+    const { userId, newBalance, reason } = body
+    if (!userId || newBalance === undefined || !reason?.trim()) {
+      return NextResponse.json({ error: 'userId, newBalance, and reason required' }, { status: 400 })
+    }
+    const newBalNum = parseFloat(newBalance)
+    if (isNaN(newBalNum) || newBalNum < 0) {
+      return NextResponse.json({ error: 'newBalance must be a non-negative number' }, { status: 400 })
+    }
+
+    const existing = await prisma.advertiserWallet.findUnique({ where: { userId }, select: { usdcBalance: true } })
+    const oldBalance = existing ? Number(existing.usdcBalance) : 0
+    const delta = newBalNum - oldBalance
+
+    await prisma.$transaction(async (tx) => {
+      await tx.advertiserWallet.upsert({
+        where: { userId },
+        create: { userId, usdcBalance: newBalNum },
+        update: { usdcBalance: newBalNum },
+      })
+      await tx.revenueEvent.create({
+        data: {
+          type: 'MANUAL_ADJUSTMENT',
+          source: 'admin_balance_set',
+          amount: Math.abs(delta),
+          currency: 'USDC',
+          userId,
+          metadata: { oldBalance, newBalance: newBalNum, delta, reason },
+        },
+      })
+    })
+
+    return NextResponse.json({ ok: true, oldBalance, newBalance: newBalNum, delta })
+  }
+
+  if (action === 'recalculate_balance_from_topups') {
+    // Recalculate user balance: confirmed real topups - total billed ad charges
+    const { userId } = body
+    if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400 })
+
+    const [realTopups, billedRevenue, mockTopups] = await Promise.all([
+      prisma.topup.aggregate({
+        where: { userId, status: 'CONFIRMED', method: 'usdc_solana', txSignature: { not: null } },
+        _sum: { actualAmount: true },
+      }),
+      prisma.revenueEvent.aggregate({
+        where: { userId, type: 'AD_RENT_REVENUE' },
+        _sum: { amount: true },
+      }),
+      prisma.topup.aggregate({
+        where: { userId, status: 'CONFIRMED', method: 'mock' },
+        _sum: { actualAmount: true },
+      }),
+    ])
+
+    const realTopupTotal = Number(realTopups._sum.actualAmount ?? 0)
+    const billedTotal = Number(billedRevenue._sum.amount ?? 0)
+    const mockTotal = Number(mockTopups._sum.actualAmount ?? 0)
+    const calculatedBalance = Math.max(0, realTopupTotal - billedTotal)
+
+    return NextResponse.json({
+      ok: true,
+      userId,
+      realTopupTotal,
+      mockTopupTotal: mockTotal,
+      billedTotal,
+      calculatedBalance,
+      note: 'Preview only — use set_wallet_balance to apply. Calculation: real topups - billed ad charges.',
+    })
+  }
+
+  if (action === 'backfill_activation_charges') {
+    // For ACTIVE rentals missing an activation revenue event, create it and deduct balance.
+    // Idempotent: checks for existing activation event before creating.
+    const now = new Date()
+    const [freeEnabled, tilePrice] = await Promise.all([isFreeRentalEnabled(), getTilePrice()])
+
+    if (freeEnabled) {
+      return NextResponse.json({ ok: true, backfilled: 0, skipped: 0, note: 'Free mode — no charges needed' })
+    }
+
+    // Group ACTIVE rentals by creative (order) to match the activation logic
+    const activeRentals = await prisma.adRental.findMany({
+      where: { status: 'ACTIVE' },
+      include: { user: { include: { advertiserWallet: true } } },
+      orderBy: { startDate: 'asc' },
+    })
+
+    // Find rentals without an activation revenue event
+    // An activation event has source='activation' or source='admin_approval'
+    const allActivationEvents = await prisma.revenueEvent.findMany({
+      where: { type: 'AD_RENT_REVENUE', source: { in: ['activation', 'admin_approval', 'ACTIVATION_BACKFILL'] } },
+      select: { userId: true, metadata: true, createdAt: true },
+    })
+
+    // Group active rentals by userId+creativeId to identify orders
+    type OrderGroup = { userId: string; rentalIds: string[]; creativeId: string | null; startDate: Date | null; wallet: { usdcBalance: number } | null }
+    const orderMap = new Map<string, OrderGroup>()
+    for (const r of activeRentals) {
+      const key = `${r.userId}::${r.creativeId ?? r.id}`
+      if (!orderMap.has(key)) {
+        orderMap.set(key, {
+          userId: r.userId,
+          rentalIds: [],
+          creativeId: r.creativeId,
+          startDate: r.startDate,
+          wallet: r.user.advertiserWallet ? { usdcBalance: Number(r.user.advertiserWallet.usdcBalance) } : null,
+        })
+      }
+      orderMap.get(key)!.rentalIds.push(r.id)
+    }
+
+    // Find which orders already have activation revenue events
+    // We match by userId and check event metadata.rentalIds or metadata.creativeId
+    const alreadyChargedCreatives = new Set<string>()
+    for (const ev of allActivationEvents) {
+      const meta = ev.metadata as Record<string, unknown> | null
+      if (meta?.creativeId && typeof meta.creativeId === 'string') {
+        alreadyChargedCreatives.add(`${ev.userId}::${meta.creativeId}`)
+      }
+      if (Array.isArray(meta?.rentalIds)) {
+        for (const rid of meta.rentalIds as string[]) {
+          alreadyChargedCreatives.add(`${ev.userId}::rental::${rid}`)
+        }
+      }
+    }
+
+    let backfilled = 0
+    let skippedInsufficient = 0
+    let skippedAlreadyCharged = 0
+    let suspended = 0
+
+    const epoch = await getOrCreateEpoch(utcDayStart(now))
+
+    for (const [key, order] of orderMap) {
+      const tileCount = order.rentalIds.length
+      const cost = tileCount * tilePrice
+
+      // Check if already charged
+      const alreadyCharged =
+        (order.creativeId && alreadyChargedCreatives.has(`${order.userId}::${order.creativeId}`)) ||
+        order.rentalIds.some((rid) => alreadyChargedCreatives.has(`${order.userId}::rental::${rid}`))
+
+      if (alreadyCharged) {
+        skippedAlreadyCharged++
+        continue
+      }
+
+      const walletBalance = order.wallet?.usdcBalance ?? 0
+      if (walletBalance < cost) {
+        // Suspend the rentals
+        await prisma.adRental.updateMany({
+          where: { id: { in: order.rentalIds } },
+          data: { status: 'SUSPENDED', endDate: now },
+        })
+        suspended += tileCount
+        continue
+      }
+
+      // Deduct balance and create revenue event
+      await prisma.$transaction(async (tx) => {
+        await tx.advertiserWallet.update({
+          where: { userId: order.userId },
+          data: { usdcBalance: { decrement: cost } },
+        })
+        await tx.revenueEvent.create({
+          data: {
+            type: 'AD_RENT_REVENUE',
+            source: 'ACTIVATION_BACKFILL',
+            amount: cost,
+            currency: 'USDC',
+            epochId: epoch.id,
+            userId: order.userId,
+            metadata: {
+              tileCount,
+              rentalIds: order.rentalIds,
+              creativeId: order.creativeId,
+              dailyRate: tilePrice,
+              backfilledAt: now.toISOString(),
+              originalStartDate: order.startDate?.toISOString() ?? null,
+            },
+          },
+        })
+        // Update nextBillingAt if not set
+        await tx.adRental.updateMany({
+          where: { id: { in: order.rentalIds }, nextBillingAt: null },
+          data: { lastBilledAt: now, nextBillingAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) },
+        })
+      })
+      backfilled += tileCount
+    }
+
+    return NextResponse.json({
+      ok: true,
+      backfilled,
+      skippedAlreadyCharged,
+      skippedInsufficient,
+      suspended,
+      note: `Backfilled ${backfilled} tiles. ${suspended} suspended (insufficient balance). ${skippedAlreadyCharged} already charged.`,
+    })
+  }
+
+  if (action === 'audit_settlement_coverage') {
+    // Ensure every AD_RENT_REVENUE and TRADING_FEE_REVENUE event has a settlement row
+    const revenueEvents = await prisma.revenueEvent.findMany({
+      where: { type: { in: ['AD_RENT_REVENUE', 'TRADING_FEE_REVENUE'] } },
+      include: { settlement: { select: { id: true } } },
+    })
+
+    const feePercentStr = await getSetting('management_fee_percent')
+    const feePercent = parseFloat(feePercentStr)
+
+    let created = 0
+    const sourceWallet = env.topupWallet ?? ''
+    const revenueWallet = env.revenueWallet ?? ''
+    const treasuryWallet = env.treasuryWallet ?? ''
+    const distributionWallet = env.distributionWallet ?? ''
+
+    for (const ev of revenueEvents) {
+      if (ev.settlement) continue
+      const amount = Number(ev.amount)
+      const treasuryAmount = (amount * feePercent) / 100
+      const distributionAmount = amount - treasuryAmount
+
+      const src = ev.type === 'TRADING_FEE_REVENUE' ? (env.feeCreatorWallet ?? sourceWallet) : sourceWallet
+
+      await prisma.revenueSettlement.create({
+        data: {
+          revenueEventId: ev.id,
+          sourceWallet: src,
+          revenueWallet,
+          treasuryWallet,
+          distributionWallet,
+          amount,
+          treasuryAmount,
+          distributionAmount,
+          settlementStatus: 'UNSETTLED',
+        },
+      })
+      created++
+    }
+
+    return NextResponse.json({
+      ok: true,
+      totalEvents: revenueEvents.length,
+      alreadyHadSettlement: revenueEvents.length - created,
+      created,
+      note: `Created ${created} missing settlement rows. Use Settlements tab to retry.`,
+    })
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

@@ -152,6 +152,16 @@ interface AccountingData {
     revenueWalletKeyConfigured: boolean
     feeCreatorWalletKeyConfigured: boolean
   }
+  reconciliation: {
+    confirmedOnChainTopups: number
+    mockTopups: number
+    activeDailyBurn: number
+    activeTileCount: number
+    earnedNotYetMoved: number
+    expectedTopupWalletBalance: number
+    topupWalletOnChain: number | null
+    variance: number | null
+  }
 }
 
 interface SettlementRow {
@@ -178,6 +188,61 @@ interface SettlementRow {
     createdAt: string
     userId: string | null
   }
+}
+
+interface WalletBalance {
+  address: string | null
+  balance: number | null
+  error?: string
+}
+
+interface SummaryData {
+  walletBalances: {
+    topupWallet: WalletBalance
+    revenueWallet: WalletBalance
+    treasuryWallet: WalletBalance
+    distributionWallet: WalletBalance
+    feeCreatorWallet: WalletBalance
+  } | null
+  board: {
+    totalTiles: number
+    activeTiles: number
+    availableTiles: number
+    pendingTiles: number
+    activeAds: number
+    activeAdvertisers: number
+  }
+  currentBurn: {
+    dailyIncome: number
+    tilePrice: number
+    freeEnabled: boolean
+  }
+  epoch: {
+    date: string
+    advertisingFeesEarned: number
+    tradingFeesEarned: number
+    grossFees: number
+    treasuryFeesGenerated: number
+    distributionPoolGenerated: number
+    feePercent: number
+  }
+  settlement: {
+    settledToTreasury: number
+    settledToDistribution: number
+    pendingSettlement: number
+    failedSettlement: number
+    pendingCount: number
+    failedCount: number
+  }
+}
+
+interface RevenueEventDetailed extends RevenueEvent {
+  settlement?: {
+    settlementStatus: string
+    moveToRevenueTxSignature: string | null
+    treasuryTxSignature: string | null
+    distributionTxSignature: string | null
+  } | null
 }
 
 interface CurrentEpochData {
@@ -291,11 +356,21 @@ export default function AdminPage() {
     rentalCount: number
     topupCount: number
     createdAt: string
+    confirmedRealTopups: number
+    mockTopups: number
+    activeDailyBurn: number
+    activeTiles: number
   }
   const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
   const [accountingData, setAccountingData] = useState<AccountingData | null>(null)
   const [settlements, setSettlements] = useState<SettlementRow[]>([])
   const [retryingSettlement, setRetryingSettlement] = useState<Record<string, boolean>>({})
+  const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [accountingEvents, setAccountingEvents] = useState<RevenueEventDetailed[]>([])
+  const [accountingSubview, setAccountingSubview] = useState<'cards' | 'events'>('cards')
+  const [repairing, setRepairing] = useState(false)
+  const [repairMsg, setRepairMsg] = useState('')
 
   // Hydration guard
   useEffect(() => { setMounted(true) }, [])
@@ -405,11 +480,12 @@ export default function AdminPage() {
         setUserBalances(d.users ?? [])
       }
     } else if (view === 'accounting') {
-      const res = await fetch('/api/admin?view=accounting')
-      if (res.ok) {
-        const d = await res.json()
-        setAccountingData(d)
-      }
+      const [accountingRes, eventsRes] = await Promise.all([
+        fetch('/api/admin?view=accounting'),
+        fetch('/api/admin?view=revenue_events'),
+      ])
+      if (accountingRes.ok) { const d = await accountingRes.json(); setAccountingData(d) }
+      if (eventsRes.ok) { const d = await eventsRes.json(); setAccountingEvents(d.events ?? []) }
     } else if (view === 'settlements') {
       const res = await fetch('/api/admin?view=settlements')
       if (res.ok) {
@@ -424,6 +500,17 @@ export default function AdminPage() {
   useEffect(() => {
     if (authed) load()
   }, [authed, load])
+
+  // Load top-level summary whenever admin is authenticated
+  useEffect(() => {
+    if (!authed) return
+    setSummaryLoading(true)
+    fetch('/api/admin?view=summary')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: SummaryData | null) => { if (d) setSummaryData(d) })
+      .catch(() => {})
+      .finally(() => setSummaryLoading(false))
+  }, [authed])
 
   // Live countdown to UTC midnight
   useEffect(() => {
@@ -460,6 +547,22 @@ export default function AdminPage() {
     } else {
       setActionMsg(d.error ?? 'Error')
     }
+  }
+
+  const runRepair = async (action: string, extra: Record<string, unknown> = {}) => {
+    setRepairing(true)
+    setRepairMsg('')
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...extra }),
+      })
+      const d = await res.json()
+      setRepairMsg(d.note ?? d.error ?? (res.ok ? 'Done ✓' : 'Error'))
+      if (res.ok) load()
+    } catch { setRepairMsg('Network error') }
+    finally { setRepairing(false) }
   }
 
   const runBilling = async () => {
@@ -827,6 +930,135 @@ export default function AdminPage() {
         </button>
       </div>
 
+      {/* ── Global summary strip ──────────────────────────────────────────────── */}
+      <div className="mb-6 border border-white/10 rounded-2xl bg-white/2 p-4 space-y-4">
+        {summaryLoading && !summaryData ? (
+          <div className="text-white/20 text-xs animate-pulse">Loading summary…</div>
+        ) : summaryData ? (
+          <>
+            {/* Accounting note */}
+            <p className="text-[10px] text-white/30 leading-relaxed">
+              <span className="text-amber-400/80 font-semibold">Note:</span>{' '}
+              Top-ups are prepaid advertiser balances, not revenue. Current Daily Income is the active ad burn rate.
+              Advertising Fees Earned is only recognized when a paid 24h period is charged.
+            </p>
+
+            {/* Row 1: Board + Burn + Epoch */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+              {[
+                {
+                  label: 'Active Tiles',
+                  value: summaryData.board.activeTiles.toLocaleString(),
+                  sub: `of ${summaryData.board.totalTiles.toLocaleString()} total`,
+                  color: summaryData.board.activeTiles > 0 ? 'text-green-400' : 'text-white/40',
+                },
+                {
+                  label: 'Available',
+                  value: summaryData.board.availableTiles.toLocaleString(),
+                  sub: summaryData.board.pendingTiles > 0 ? `${summaryData.board.pendingTiles} pending` : 'tiles free',
+                  color: 'text-white/70',
+                },
+                {
+                  label: 'Active Ads',
+                  value: String(summaryData.board.activeAds),
+                  sub: `${summaryData.board.activeAdvertisers} advertiser${summaryData.board.activeAdvertisers !== 1 ? 's' : ''}`,
+                  color: 'text-white/70',
+                },
+                {
+                  label: 'Daily Income',
+                  value: summaryData.currentBurn.freeEnabled ? 'FREE MODE' : `$${summaryData.currentBurn.dailyIncome.toFixed(2)}`,
+                  sub: summaryData.currentBurn.freeEnabled ? 'no charges' : `$${summaryData.currentBurn.tilePrice}/tile/day`,
+                  color: summaryData.currentBurn.freeEnabled ? 'text-amber-400' : 'text-green-400',
+                },
+                {
+                  label: `Ad Fees Today`,
+                  value: `$${summaryData.epoch.advertisingFeesEarned.toFixed(2)}`,
+                  sub: `+$${summaryData.epoch.tradingFeesEarned.toFixed(2)} trading`,
+                  color: 'text-green-400',
+                },
+                {
+                  label: 'Distribution Pool',
+                  value: `$${summaryData.epoch.distributionPoolGenerated.toFixed(2)}`,
+                  sub: `$${summaryData.epoch.treasuryFeesGenerated.toFixed(2)} treasury (${summaryData.epoch.feePercent}%)`,
+                  color: 'text-blue-400',
+                },
+              ].map(({ label, value, sub, color }) => (
+                <div key={label} className="bg-white/3 rounded-xl p-2.5 space-y-0.5">
+                  <div className={`font-mono font-bold text-base leading-tight ${color}`}>{value}</div>
+                  <div className="text-white/60 text-[10px] font-medium">{label}</div>
+                  <div className="text-white/25 text-[10px]">{sub}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Row 2: Wallet balances */}
+            <div>
+              <div className="text-[10px] text-white/30 uppercase tracking-widest mb-1.5">On-Chain USDC Balances</div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {summaryData.walletBalances ? (
+                  ([
+                    ['Top-Up Wallet', summaryData.walletBalances.topupWallet, 'text-amber-400'],
+                    ['Revenue Wallet', summaryData.walletBalances.revenueWallet, 'text-green-400'],
+                    ['Treasury Wallet', summaryData.walletBalances.treasuryWallet, 'text-white/70'],
+                    ['Distribution', summaryData.walletBalances.distributionWallet, 'text-blue-400'],
+                    ['Fee Creator', summaryData.walletBalances.feeCreatorWallet, 'text-white/70'],
+                  ] as [string, WalletBalance, string][]).map(([label, wb, color]) => (
+                    <div key={label} className="bg-white/3 rounded-xl px-3 py-2 space-y-0.5">
+                      <div className={`font-mono font-bold text-sm ${wb.balance !== null ? color : 'text-white/20'}`}>
+                        {wb.address === null ? '—' : wb.balance !== null ? `$${wb.balance.toFixed(2)}` : 'Unavail.'}
+                      </div>
+                      <div className="text-white/50 text-[10px]">{label}</div>
+                      {wb.error && (
+                        <div className="text-red-400/60 text-[9px] truncate" title={wb.error}>err: {wb.error.slice(0, 30)}</div>
+                      )}
+                      {wb.address && (
+                        <div className="text-white/20 text-[9px] font-mono">{wb.address.slice(0, 4)}…{wb.address.slice(-4)}</div>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <div className="col-span-5 text-white/20 text-xs">Wallet balances unavailable</div>
+                )}
+              </div>
+            </div>
+
+            {/* Row 3: Settlement state */}
+            {(summaryData.settlement.pendingCount > 0 || summaryData.settlement.failedCount > 0 || summaryData.settlement.settledToTreasury > 0) && (
+              <div className="flex flex-wrap gap-3 text-xs">
+                {summaryData.settlement.failedCount > 0 && (
+                  <span className="bg-red-500/10 border border-red-500/20 text-red-400 px-2.5 py-1 rounded-full">
+                    {summaryData.settlement.failedCount} failed settlement{summaryData.settlement.failedCount !== 1 ? 's' : ''} — ${summaryData.settlement.failedSettlement.toFixed(2)} stuck
+                  </span>
+                )}
+                {summaryData.settlement.pendingCount > 0 && (
+                  <span className="bg-amber-500/10 border border-amber-500/20 text-amber-400 px-2.5 py-1 rounded-full">
+                    {summaryData.settlement.pendingCount} pending — ${summaryData.settlement.pendingSettlement.toFixed(2)}
+                  </span>
+                )}
+                {summaryData.settlement.settledToTreasury > 0 && (
+                  <span className="bg-white/5 border border-white/10 text-white/40 px-2.5 py-1 rounded-full">
+                    Treasury: ${summaryData.settlement.settledToTreasury.toFixed(2)} · Distribution: ${summaryData.settlement.settledToDistribution.toFixed(2)} settled
+                  </span>
+                )}
+                <button
+                  onClick={() => {
+                    setSummaryLoading(true)
+                    fetch('/api/admin?view=summary')
+                      .then((r) => (r.ok ? r.json() : null))
+                      .then((d: SummaryData | null) => { if (d) setSummaryData(d) })
+                      .catch(() => {})
+                      .finally(() => setSummaryLoading(false))
+                  }}
+                  className="text-white/20 hover:text-white/50 text-[10px] transition-colors"
+                >
+                  ↻ refresh
+                </button>
+              </div>
+            )}
+          </>
+        ) : null}
+      </div>
+
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
         {(['pending', 'active', 'billing', 'accounting', 'settlements', 'epochs', 'distribution', 'pricing', 'topups', 'users', 'reset'] as AdminView[]).map((v) => (
@@ -1042,7 +1274,33 @@ export default function AdminPage() {
               {rentals.length === 0 ? (
                 <div className="text-white/30 text-sm text-center py-12">No active rentals.</div>
               ) : (
-                rentals.map((order) => (
+                <>
+                  {/* Totals summary bar */}
+                  {(() => {
+                    const totalTiles = rentals.reduce((s, o) => s + o.tileCount, 0)
+                    const totalDaily = rentals.reduce((s, o) => s + o.dailyRateTotal, 0)
+                    const avgDaily = rentals.length > 0 ? totalDaily / rentals.length : 0
+                    return (
+                      <div className="flex flex-wrap items-center gap-4 px-4 py-2.5 bg-green-400/5 border border-green-400/20 rounded-xl text-xs">
+                        <span className="text-white/50">
+                          <span className="text-white font-bold">{rentals.length}</span> active order{rentals.length !== 1 ? 's' : ''}
+                        </span>
+                        <span className="text-white/30">·</span>
+                        <span className="text-white/50">
+                          <span className="text-green-400 font-bold">{totalTiles}</span> tiles rented
+                        </span>
+                        <span className="text-white/30">·</span>
+                        <span className="text-white/50">
+                          <span className="text-green-400 font-bold">${totalDaily.toFixed(2)}</span>/day total
+                        </span>
+                        <span className="text-white/30">·</span>
+                        <span className="text-white/50">
+                          avg <span className="text-white font-mono">${avgDaily.toFixed(2)}</span>/day per order
+                        </span>
+                      </div>
+                    )
+                  })()}
+                  {rentals.map((order) => (
                   <div
                     key={order.creativeId ?? order.rentalIds[0]}
                     className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4"
@@ -1145,13 +1403,19 @@ export default function AdminPage() {
                       </div>
                     </div>
                   </div>
-                ))
+                  ))}
+                </>
               )}
             </div>
           )}
 
           {view === 'billing' && (
-            <div>
+            <div className="space-y-4">
+              <div className="border border-white/5 bg-white/2 rounded-xl px-4 py-3 text-[10px] text-white/40 leading-relaxed">
+                <span className="text-amber-300/70 font-semibold">Renewal Billing History</span> — This table shows historical renewal billing runs (recurring 24h charges on existing active ads).
+                It does <em>not</em> include first-24h activation charges, which are deducted immediately when an ad is approved.
+                For all revenue events (including activation charges), see the <button onClick={() => { setView('accounting'); setAccountingSubview('events') }} className="text-amber-400 hover:text-amber-300 underline transition-colors">Accounting → Revenue Events</button> tab.
+              </div>
               {billingRuns.length === 0 ? (
                 <div className="text-white/30 text-sm text-center py-12">
                   No billing runs yet. Click &quot;Run daily billing&quot; above.
@@ -1161,8 +1425,8 @@ export default function AdminPage() {
                   <thead>
                     <tr className="text-white/40 text-xs uppercase tracking-widest border-b border-white/10">
                       <th className="pb-2 text-left font-medium">Date</th>
-                      <th className="pb-2 text-right font-medium">Tiles</th>
-                      <th className="pb-2 text-right font-medium">Revenue</th>
+                      <th className="pb-2 text-right font-medium">Tiles Billed</th>
+                      <th className="pb-2 text-right font-medium">Revenue Recognized</th>
                       <th className="pb-2 text-right font-medium">Status</th>
                     </tr>
                   </thead>
@@ -1171,7 +1435,7 @@ export default function AdminPage() {
                       <tr key={r.id} className="border-b border-white/5">
                         <td className="py-3 text-white/70">{new Date(r.runDate).toLocaleDateString()}</td>
                         <td className="py-3 text-right font-mono text-white/70">{r.tilesCharged}</td>
-                        <td className="py-3 text-right font-mono text-green-400">
+                        <td className="py-3 text-right font-mono text-green-400" title="AD_RENT_REVENUE from this renewal run">
                           ${Number(r.totalRevenue).toFixed(2)}
                         </td>
                         <td className="py-3 text-right">
@@ -1904,7 +2168,7 @@ export default function AdminPage() {
           {view === 'users' && (
             <div className="space-y-4">
               <div className="text-xs text-white/40 mb-2">
-                Advertiser accounts — use this to verify wallet→balance associations after any wallet switching issues.
+                Advertiser accounts — internal USDC balance, real vs mock topups, active burn rate.
               </div>
               {userBalances.length === 0 ? (
                 <p className="text-white/30 text-sm text-center py-8">No advertiser accounts found.</p>
@@ -1913,18 +2177,20 @@ export default function AdminPage() {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
-                        <th className="pb-2 text-left font-medium pr-4 whitespace-nowrap">Wallet Address</th>
-                        <th className="pb-2 text-left font-medium pr-4 whitespace-nowrap">Email</th>
-                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Balance (USDC)</th>
-                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Rentals</th>
-                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Topups</th>
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Wallet</th>
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Email</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Balance</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Real Topups</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Mock Topups</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Daily Burn</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Tiles</th>
                         <th className="pb-2 text-right font-medium whitespace-nowrap">Joined</th>
                       </tr>
                     </thead>
                     <tbody>
                       {userBalances.map((u) => (
                         <tr key={u.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
-                          <td className="py-2 pr-4">
+                          <td className="py-2 pr-3">
                             {u.walletAddress ? (
                               <span className="font-mono text-green-400/80">
                                 {u.walletAddress.slice(0, 6)}…{u.walletAddress.slice(-4)}
@@ -1933,12 +2199,22 @@ export default function AdminPage() {
                               <span className="text-white/20 italic">none</span>
                             )}
                           </td>
-                          <td className="py-2 pr-4 text-white/50 truncate max-w-[160px]">{u.email ?? '—'}</td>
-                          <td className={`py-2 pr-4 text-right font-mono font-bold ${u.balance > 0 ? 'text-green-400' : 'text-white/30'}`}>
+                          <td className="py-2 pr-3 text-white/50 truncate max-w-[140px]">{u.email ?? '—'}</td>
+                          <td className={`py-2 pr-3 text-right font-mono font-bold ${u.balance > 0 ? 'text-green-400' : 'text-white/30'}`}>
                             ${u.balance.toFixed(2)}
                           </td>
-                          <td className="py-2 pr-4 text-right font-mono text-white/50">{u.rentalCount}</td>
-                          <td className="py-2 pr-4 text-right font-mono text-white/50">{u.topupCount}</td>
+                          <td className={`py-2 pr-3 text-right font-mono ${u.confirmedRealTopups > 0 ? 'text-white/70' : 'text-white/20'}`}>
+                            {u.confirmedRealTopups > 0 ? `$${u.confirmedRealTopups.toFixed(2)}` : '—'}
+                          </td>
+                          <td className={`py-2 pr-3 text-right font-mono ${u.mockTopups > 0 ? 'text-amber-400/70' : 'text-white/20'}`}>
+                            {u.mockTopups > 0 ? `$${u.mockTopups.toFixed(2)}` : '—'}
+                          </td>
+                          <td className={`py-2 pr-3 text-right font-mono ${u.activeDailyBurn > 0 ? 'text-green-400/70' : 'text-white/20'}`}>
+                            {u.activeDailyBurn > 0 ? `$${u.activeDailyBurn.toFixed(2)}/d` : '—'}
+                          </td>
+                          <td className={`py-2 pr-3 text-right font-mono ${u.activeTiles > 0 ? 'text-white/60' : 'text-white/20'}`}>
+                            {u.activeTiles > 0 ? u.activeTiles : '—'}
+                          </td>
                           <td className="py-2 text-right text-white/30">{new Date(u.createdAt).toLocaleDateString()}</td>
                         </tr>
                       ))}
@@ -1961,12 +2237,87 @@ export default function AdminPage() {
                 <p className="text-white/30 text-sm text-center py-8">Loading accounting data…</p>
               ) : (
                 <>
+                  {/* ── Reconciliation panel ────────────────────────────────── */}
+                  {(() => {
+                    const rec = accountingData.reconciliation
+                    const hasMismatch = rec.variance !== null && Math.abs(rec.variance) > 0.01
+                    const onChainLow = rec.variance !== null && rec.variance < -0.01
+                    return (
+                      <div className={`border rounded-xl p-4 space-y-3 ${hasMismatch ? 'border-red-500/40 bg-red-500/5' : 'border-white/10 bg-white/2'}`}>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-xs font-bold text-white/50 uppercase tracking-widest">
+                            {hasMismatch ? '⚠ Accounting Reconciliation — MISMATCH DETECTED' : 'Accounting Reconciliation'}
+                          </h3>
+                          <span className="text-[10px] text-white/20">Expected = advertiser balances + unsettled earned fees</span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                          {[
+                            { label: 'Unused Advertiser Balances', value: `$${accountingData.unusedAdvertiserBalances.toFixed(2)}`, color: 'text-amber-400' },
+                            { label: 'Earned Not Yet Moved', value: `$${rec.earnedNotYetMoved.toFixed(2)}`, color: 'text-white/70', note: 'Unsettled/failed settlement amounts' },
+                            { label: 'Expected Top-Up Wallet', value: `$${rec.expectedTopupWalletBalance.toFixed(2)}`, color: 'text-white/80' },
+                            {
+                              label: 'Actual On-Chain Balance',
+                              value: rec.topupWalletOnChain !== null ? `$${rec.topupWalletOnChain.toFixed(2)}` : 'Unavailable',
+                              color: onChainLow ? 'text-red-400' : 'text-green-400',
+                            },
+                          ].map(({ label, value, color, note }) => (
+                            <div key={label} className="bg-white/3 rounded-lg p-2">
+                              <div className={`font-mono font-bold text-sm ${color}`}>{value}</div>
+                              <div className="text-white/40 text-[10px] mt-0.5">{label}</div>
+                              {note && <div className="text-white/20 text-[9px]">{note}</div>}
+                            </div>
+                          ))}
+                        </div>
+                        {rec.variance !== null && (
+                          <div className={`text-xs font-mono px-3 py-1.5 rounded ${hasMismatch ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-400'}`}>
+                            Variance: {rec.variance >= 0 ? '+' : ''}{rec.variance.toFixed(4)} USDC
+                            {hasMismatch && ' — App balances exceed on-chain funds. Reconciliation required before launch.'}
+                            {!hasMismatch && ' — Balanced ✓'}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-white/40 pt-1 border-t border-white/5">
+                          <span>Real on-chain topups: <span className="text-white/60">${rec.confirmedOnChainTopups.toFixed(2)}</span></span>
+                          <span>Mock/test topups: <span className={`${rec.mockTopups > 0 ? 'text-amber-400/70' : 'text-white/60'}`}>${rec.mockTopups.toFixed(2)}</span></span>
+                          <span>Active tiles: <span className="text-white/60">{rec.activeTileCount}</span></span>
+                          <span>Daily burn: <span className="text-white/60">${rec.activeDailyBurn.toFixed(2)}/day</span></span>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {/* ── Repair tools ─────────────────────────────────────────── */}
+                  <div className="border border-amber-500/20 rounded-xl p-4 space-y-3">
+                    <h3 className="text-xs font-bold text-amber-400/80 uppercase tracking-widest">Repair Tools</h3>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        disabled={repairing}
+                        onClick={() => runRepair('backfill_activation_charges')}
+                        className="text-xs bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                      >
+                        Backfill Activation Charges
+                      </button>
+                      <button
+                        disabled={repairing}
+                        onClick={() => runRepair('audit_settlement_coverage')}
+                        className="text-xs bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 text-blue-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                      >
+                        Audit Settlement Coverage
+                      </button>
+                    </div>
+                    {repairMsg && (
+                      <div className={`text-xs px-3 py-2 rounded font-mono ${repairMsg.includes('Error') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'}`}>
+                        {repairMsg}
+                      </div>
+                    )}
+                    <p className="text-[10px] text-white/25">
+                      <strong>Backfill:</strong> For ACTIVE ads missing a first-24h charge, deducts balance and creates AD_RENT_REVENUE.
+                      Idempotent — never double-charges. Suspends ads with insufficient balance.{' '}
+                      <strong>Audit:</strong> Creates UNSETTLED settlement rows for any AD_RENT_REVENUE events that have no settlement record.
+                    </p>
+                  </div>
+
                   {/* Balance health check */}
                   {(() => {
-                    const totalEarned = accountingData.earnedAdFees + accountingData.earnedTradingFees
-                    const unsettled = totalEarned - accountingData.totalSettled
-                    const minRequired = accountingData.unusedAdvertiserBalances + Math.max(0, unsettled)
-                    const isHealthy = true // on-chain balance unknown without RPC; show warning only on data anomalies
                     const hasFailures = accountingData.failedSettlements > 0
                     return hasFailures ? (
                       <div className="border border-red-500/40 bg-red-500/5 rounded-xl px-4 py-3 text-xs text-red-300">
@@ -2071,9 +2422,117 @@ export default function AdminPage() {
                     )}
                   </div>
 
-                  <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-4 py-2 rounded transition-colors">
-                    Refresh
-                  </button>
+                  {/* Sub-tab toggle */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setAccountingSubview('cards')}
+                      className={`text-xs px-3 py-1.5 rounded transition-colors ${accountingSubview === 'cards' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-white/5 text-white/40 hover:text-white border border-white/10'}`}
+                    >
+                      Summary Cards
+                    </button>
+                    <button
+                      onClick={() => setAccountingSubview('events')}
+                      className={`text-xs px-3 py-1.5 rounded transition-colors ${accountingSubview === 'events' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-white/5 text-white/40 hover:text-white border border-white/10'}`}
+                    >
+                      Revenue Events ({accountingEvents.length})
+                    </button>
+                    <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-4 py-2 rounded transition-colors ml-auto">
+                      Refresh
+                    </button>
+                  </div>
+
+                  {accountingSubview === 'events' && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] text-white/30">
+                        All revenue events — AD_RENT_REVENUE includes both activation and renewal charges.
+                        TOPUP_DEPOSIT is prepaid balance, not revenue.
+                      </p>
+                      {accountingEvents.length === 0 ? (
+                        <p className="text-white/20 text-xs text-center py-8">No revenue events yet.</p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
+                                <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Date</th>
+                                <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Type</th>
+                                <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Amount</th>
+                                <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Source</th>
+                                <th className="pb-2 text-center font-medium pr-3 whitespace-nowrap">Settlement</th>
+                                <th className="pb-2 text-left font-medium whitespace-nowrap">Txs</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {accountingEvents.map((ev) => {
+                                const isRevenue = ev.type === 'AD_RENT_REVENUE' || ev.type === 'TRADING_FEE_REVENUE'
+                                const isDeposit = ev.type === 'TOPUP_DEPOSIT'
+                                const settlStatus = ev.settlement?.settlementStatus
+                                const settleColor = settlStatus === 'SETTLED' ? 'text-green-400 bg-green-400/10'
+                                  : settlStatus === 'FAILED' ? 'text-red-400 bg-red-400/10'
+                                  : settlStatus === 'PARTIAL' ? 'text-amber-400 bg-amber-400/10'
+                                  : settlStatus ? 'text-blue-400 bg-blue-400/10'
+                                  : 'text-white/20 bg-white/5'
+                                return (
+                                  <tr key={ev.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
+                                    <td className="py-2 pr-3 text-white/40 whitespace-nowrap">
+                                      {new Date(ev.createdAt).toLocaleDateString()}
+                                      <div className="text-[9px] text-white/20">{new Date(ev.createdAt).toLocaleTimeString()}</div>
+                                    </td>
+                                    <td className="py-2 pr-3">
+                                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium ${
+                                        ev.type === 'AD_RENT_REVENUE' ? 'text-green-400 bg-green-400/10'
+                                        : ev.type === 'TRADING_FEE_REVENUE' ? 'text-blue-400 bg-blue-400/10'
+                                        : ev.type === 'TOPUP_DEPOSIT' ? 'text-amber-400/70 bg-amber-400/10'
+                                        : 'text-white/40 bg-white/5'
+                                      }`}>
+                                        {ev.type === 'AD_RENT_REVENUE' ? 'AD_RENT'
+                                          : ev.type === 'TRADING_FEE_REVENUE' ? 'TRADING_FEE'
+                                          : ev.type === 'TOPUP_DEPOSIT' ? 'TOPUP (not revenue)'
+                                          : ev.type}
+                                      </span>
+                                    </td>
+                                    <td className={`py-2 pr-3 text-right font-mono font-bold ${isDeposit ? 'text-amber-400/70' : isRevenue ? 'text-green-400' : 'text-white/50'}`}>
+                                      ${Number(ev.amount).toFixed(4)}
+                                    </td>
+                                    <td className="py-2 pr-3 text-white/30 font-mono text-[10px]">
+                                      {ev.source}
+                                    </td>
+                                    <td className="py-2 pr-3 text-center">
+                                      {ev.settlement ? (
+                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${settleColor}`}>
+                                          {settlStatus}
+                                        </span>
+                                      ) : isRevenue ? (
+                                        <span className="text-[10px] text-red-400/60">no settlement</span>
+                                      ) : (
+                                        <span className="text-[10px] text-white/15">—</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2">
+                                      <div className="flex gap-1.5 flex-wrap">
+                                        {ev.settlement?.moveToRevenueTxSignature && (
+                                          <a href={`https://solscan.io/tx/${ev.settlement.moveToRevenueTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">rev↗</a>
+                                        )}
+                                        {ev.settlement?.treasuryTxSignature && (
+                                          <a href={`https://solscan.io/tx/${ev.settlement.treasuryTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">tr↗</a>
+                                        )}
+                                        {ev.settlement?.distributionTxSignature && (
+                                          <a href={`https://solscan.io/tx/${ev.settlement.distributionTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">di↗</a>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
