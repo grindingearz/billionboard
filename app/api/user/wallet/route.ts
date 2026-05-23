@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { getSession } from '@/lib/auth'
+import { getSession, walletMismatch } from '@/lib/auth'
 
 const SOLANA_ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const user = await prisma.user.findUnique({
     where: { id: session.userId },
@@ -18,6 +19,7 @@ export async function GET() {
 export async function PATCH(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const { walletAddress } = await req.json()
   if (typeof walletAddress !== 'string' || !SOLANA_ADDRESS_RE.test(walletAddress)) {

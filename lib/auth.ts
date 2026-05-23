@@ -9,6 +9,14 @@ export interface SessionPayload {
   role: 'ADVERTISER' | 'ADMIN'
   /** Set only for ADMIN sessions; tied to the verified ADMIN_WALLET address. */
   adminWallet?: string
+  /** Set for ADVERTISER sessions; matches the Solana wallet address used to log in. */
+  walletAddress?: string
+}
+
+/** Returns true if the request's X-Wallet-Address header disagrees with the session wallet. */
+export function walletMismatch(session: SessionPayload, req: Request): boolean {
+  const reqWallet = req.headers.get('x-wallet-address')
+  return !!(session.walletAddress && reqWallet && session.walletAddress !== reqWallet)
 }
 
 export async function getSession(): Promise<SessionPayload | null> {

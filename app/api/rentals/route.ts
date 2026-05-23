@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { getSession } from '@/lib/auth'
+import { getSession, walletMismatch } from '@/lib/auth'
 import { TOTAL_TILES, isRectangularSelection } from '@/lib/types'
 import { getTilePrice, isFreeRentalEnabled, isAutoApproveEnabled } from '@/lib/settings'
 
@@ -11,9 +11,10 @@ function normalizeDestUrl(raw: string): string {
   return `https://${stripped}`
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const rentals = await prisma.adRental.findMany({
     where: { userId: session.userId },
@@ -27,6 +28,7 @@ export async function GET() {
 export async function POST(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const { tileIds, imageUrl, destUrl, altText, displayMode: rawDisplayMode } = await req.json()
   const displayMode = rawDisplayMode === 'STRETCH' ? 'STRETCH' : 'REPEAT'
@@ -133,6 +135,7 @@ export async function POST(req: Request) {
 export async function DELETE(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const { rentalId } = await req.json()
   const rental = await prisma.adRental.findUnique({ where: { id: rentalId } })

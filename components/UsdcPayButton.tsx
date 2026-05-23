@@ -83,7 +83,9 @@ export default function UsdcPayButton({ onConfirmed }: UsdcPayButtonProps) {
   useEffect(() => {
     if (state !== 'waiting' || !pendingTopupId) return
     const id = setInterval(async () => {
-      const res = await fetch('/api/topup')
+      const res = await fetch('/api/topup', {
+        headers: publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {},
+      })
       if (!res.ok) return
       const data = await res.json()
       const topup = (data.topups as Array<{ id: string; status: string }>)
@@ -99,7 +101,7 @@ export default function UsdcPayButton({ onConfirmed }: UsdcPayButtonProps) {
       }
     }, 7000)
     return () => clearInterval(id)
-  }, [state, pendingTopupId, onConfirmed])
+  }, [state, pendingTopupId, onConfirmed, publicKey])
 
   const handlePay = useCallback(async () => {
     if (!publicKey) return
@@ -117,7 +119,7 @@ export default function UsdcPayButton({ onConfirmed }: UsdcPayButtonProps) {
     try {
       const res = await fetch('/api/topup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
         body: JSON.stringify({ method: 'usdc_solana' }),
       })
       const data = await res.json()
@@ -195,7 +197,7 @@ export default function UsdcPayButton({ onConfirmed }: UsdcPayButtonProps) {
       // 200 with ok:true means hint stored; Helius is still the confirmation source
       fetch('/api/topup', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
         body: JSON.stringify({ topupId, txSignature: signature }),
       }).catch(() => {})
 

@@ -168,7 +168,9 @@ export default function AdvertisePage() {
 
   const loadBalance = useCallback(async () => {
     const forWallet = authedWalletRef.current  // snapshot: which wallet this fetch is for
-    const res = await fetch('/api/topup')
+    const res = await fetch('/api/topup', {
+      headers: forWallet ? { 'x-wallet-address': forWallet } : {},
+    })
     if (!res.ok) return
     // Discard if wallet changed while this request was in-flight
     if (authedWalletRef.current !== forWallet) return
@@ -284,7 +286,7 @@ export default function AdvertisePage() {
     try {
       const res = await fetch('/api/user/wallet', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {}) },
         body: JSON.stringify({ walletAddress: walletInput.trim() }),
       })
       const data = await res.json()
@@ -320,7 +322,7 @@ export default function AdvertisePage() {
       // 1. Create pending topup with amount
       const res = await fetch('/api/topup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
         body: JSON.stringify({ method: 'usdc_solana', amount: amt }),
       })
       const data = await res.json() as { topupId?: string; depositWallet?: string; advertiserWallet?: string; expiresAt?: string; error?: string }
@@ -353,7 +355,7 @@ export default function AdvertisePage() {
       // 4. Store signature immediately, then kick off immediate Helius verify
       await fetch('/api/topup', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
         body: JSON.stringify({ topupId, txSignature: signature }),
       })
 
@@ -364,7 +366,7 @@ export default function AdvertisePage() {
       // Immediately check — backend attempts Helius confirmation right away
       fetch('/api/topup/check', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
         body: JSON.stringify({ topupId }),
       }).catch(() => {})
     } catch (e) {
@@ -405,7 +407,7 @@ export default function AdvertisePage() {
     try {
       const res = await fetch('/api/topup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {}) },
         body: JSON.stringify({ method: 'mock', amount: topupAmount }),
       })
       const text = await res.text()
@@ -446,7 +448,7 @@ export default function AdvertisePage() {
         try {
           const res = await fetch('/api/topup/check', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...(publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {}) },
             body: JSON.stringify({ topupId: pendingDeposit.topupId }),
           })
           if (!res.ok) return
@@ -465,7 +467,9 @@ export default function AdvertisePage() {
       }
 
       // No sig stored yet — plain poll to pick up balance/status changes
-      const res = await fetch('/api/topup')
+      const res = await fetch('/api/topup', {
+        headers: publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {},
+      })
       if (!res.ok) return
       const data = await res.json()
       setBalance(Number(data.balance))
@@ -528,7 +532,7 @@ export default function AdvertisePage() {
     const fullDestUrl = `https://${form.destUrl.trim()}`
     const res = await fetch('/api/rentals', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
       body: JSON.stringify({
         tileIds: Array.from(selectedTiles),
         imageUrl: form.imageUrl,

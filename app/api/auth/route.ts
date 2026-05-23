@@ -59,7 +59,7 @@ export async function POST(req: Request) {
     create: { userId: user.id },
   })
 
-  const token = await createSessionToken({ userId: user.id, role: 'ADVERTISER' })
+  const token = await createSessionToken({ userId: user.id, role: 'ADVERTISER', walletAddress: walletAddress ?? undefined })
   const cookieStore = await cookies()
   cookieStore.set(sessionCookieOptions().name, token, sessionCookieOptions())
   return NextResponse.json({ ok: true, role: 'ADVERTISER', userId: user.id })

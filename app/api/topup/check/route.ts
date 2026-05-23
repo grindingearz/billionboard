@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { getSession } from '@/lib/auth'
+import { getSession, walletMismatch } from '@/lib/auth'
 import { verifyAndProcessSignature } from '@/lib/usdc-topup'
 
 export async function POST(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const body = await req.json()
   const { topupId } = body as { topupId?: string }

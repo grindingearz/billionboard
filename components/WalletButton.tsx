@@ -55,12 +55,14 @@ export default function WalletButton() {
   const fetchDashboard = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/user/dashboard')
+      const res = await fetch('/api/user/dashboard', {
+        headers: publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {},
+      })
       if (res.ok) setData(await res.json())
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [publicKey])
 
   useEffect(() => {
     function onClick(e: MouseEvent) {

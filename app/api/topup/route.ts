@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { Prisma } from '@/app/generated/prisma/client'
-import { getSession } from '@/lib/auth'
+import { getSession, walletMismatch } from '@/lib/auth'
 import { getDepositWallet, TOPUP_EXPIRY_HOURS, verifyAndProcessSignature } from '@/lib/usdc-topup'
 
 export async function POST(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const body = await req.json()
   const method: string = body.method ?? 'usdc_solana'
@@ -92,6 +93,7 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const { topupId, txSignature } = await req.json()
   if (!topupId || !txSignature) {
@@ -134,9 +136,10 @@ export async function PATCH(req: Request) {
   return NextResponse.json({ ok: true })
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const [wallet, topups] = await Promise.all([
     prisma.advertiserWallet.findUnique({

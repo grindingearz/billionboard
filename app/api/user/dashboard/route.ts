@@ -1,14 +1,15 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { getSession } from '@/lib/auth'
+import { getSession, walletMismatch } from '@/lib/auth'
 
 function getDomain(url: string): string {
   try { return new URL(url).hostname } catch { return url.replace(/^https?:\/\//, '').split('/')[0] }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
   const [user, wallet, activeRentals, pendingAdsCount] = await Promise.all([
     prisma.user.findUnique({
