@@ -6,6 +6,7 @@ import { getSetting } from '@/lib/settings'
 import { createRevenueEvent, getGrossRevenueForDate } from '@/lib/revenue'
 import { fetchTokenHolders } from '@/lib/helius'
 import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc } from '@/lib/epoch'
+import { processUsdcTransfer, USDC_MINT, getDepositWallet } from '@/lib/usdc-topup'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -502,35 +503,40 @@ export async function POST(req: Request) {
 
   if (action === 'assign_topup') {
     const { txId, userId } = body
-    const tx = await prisma.processedTransaction.findUnique({ where: { id: txId } })
-    if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
-    if (tx.topupId) return NextResponse.json({ error: 'Already assigned' }, { status: 409 })
+    if (!txId || !userId) return NextResponse.json({ error: 'txId and userId required' }, { status: 400 })
 
-    const topup = await prisma.topup.create({
-      data: {
-        userId,
-        amount: tx.amountUsdc,
-        method: 'usdc_solana',
-        status: 'CONFIRMED',
-        txSignature: tx.signature,
-        actualAmount: tx.amountUsdc,
-        advertiserWallet: tx.senderWallet,
-        depositWallet: tx.receiverWallet,
-        confirmedAt: tx.processedAt,
-      },
-    })
-    await prisma.$transaction([
-      prisma.processedTransaction.update({
+    // All reads and writes in a single transaction to prevent race-condition double-credit
+    const result = await prisma.$transaction(async (tx) => {
+      const processedTx = await tx.processedTransaction.findUnique({ where: { id: txId } })
+      if (!processedTx) throw new Error('Transaction not found')
+      if (processedTx.topupId) throw new Error('Already assigned')
+
+      const topup = await tx.topup.create({
+        data: {
+          userId,
+          amount: processedTx.amountUsdc,
+          method: 'usdc_solana',
+          status: 'CONFIRMED',
+          txSignature: processedTx.signature,
+          actualAmount: processedTx.amountUsdc,
+          advertiserWallet: processedTx.senderWallet,
+          depositWallet: processedTx.receiverWallet,
+          confirmedAt: processedTx.processedAt,
+        },
+      })
+      await tx.processedTransaction.update({
         where: { id: txId },
         data: { topupId: topup.id },
-      }),
-      prisma.advertiserWallet.upsert({
+      })
+      await tx.advertiserWallet.upsert({
         where: { userId },
-        create: { userId, usdcBalance: tx.amountUsdc },
-        update: { usdcBalance: { increment: tx.amountUsdc } },
-      }),
-    ])
-    return NextResponse.json({ ok: true })
+        create: { userId, usdcBalance: processedTx.amountUsdc },
+        update: { usdcBalance: { increment: processedTx.amountUsdc } },
+      })
+      return topup
+    })
+
+    return NextResponse.json({ ok: true, topup: result })
   }
 
   if (action === 'expire_topup') {
@@ -540,6 +546,62 @@ export async function POST(req: Request) {
       data: { status: 'EXPIRED' },
     })
     return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'check_tx_signature') {
+    const { signature } = body
+    if (!signature?.trim()) return NextResponse.json({ error: 'signature required' }, { status: 400 })
+
+    const heliusApiKey = env.heliusApiKey
+    const depositWallet = getDepositWallet()
+    const usdcMint = process.env.NEXT_PUBLIC_USDC_MINT?.trim() || USDC_MINT
+
+    if (!heliusApiKey || !depositWallet) {
+      return NextResponse.json({ error: 'HELIUS_API_KEY or AD_REVENUE_WALLET not configured' }, { status: 503 })
+    }
+
+    const heliusUrl = `https://api.helius.xyz/v0/transactions?api-key=${heliusApiKey}`
+    const resp = await fetch(heliusUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transactions: [signature.trim()] }),
+    })
+
+    if (!resp.ok) {
+      return NextResponse.json({ ok: false, error: `Helius error: HTTP ${resp.status}` }, { status: 502 })
+    }
+
+    const txs = await resp.json()
+    if (!Array.isArray(txs) || txs.length === 0) {
+      return NextResponse.json({ ok: false, found: false, message: 'Transaction not found on Helius' })
+    }
+
+    const tx = txs[0] as {
+      signature: string
+      tokenTransfers?: Array<{ mint: string; toUserAccount: string; fromUserAccount: string; tokenAmount: number }>
+    }
+    const transfers = (tx.tokenTransfers ?? []).filter(
+      (t) => t.mint === usdcMint && t.toUserAccount === depositWallet
+    )
+
+    if (transfers.length === 0) {
+      return NextResponse.json({
+        ok: false,
+        found: false,
+        message: 'No USDC transfer to deposit wallet found in this transaction',
+        debug: { tokenTransfers: tx.tokenTransfers ?? [], depositWallet, usdcMint },
+      })
+    }
+
+    const results = []
+    for (const t of transfers) {
+      const result = await processUsdcTransfer(
+        tx.signature, t.fromUserAccount, t.toUserAccount, t.tokenAmount, 'reconcile', JSON.stringify(tx)
+      )
+      results.push({ ...result, amount: t.tokenAmount, sender: t.fromUserAccount })
+    }
+
+    return NextResponse.json({ ok: true, found: true, results })
   }
 
   if (action === 'reconcile') {

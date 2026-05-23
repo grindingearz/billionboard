@@ -152,11 +152,42 @@ interface CurrentEpochData {
   msUntilClose: number
 }
 
+interface ReconcileDetail {
+  signature: string
+  sender: string
+  receiver: string
+  amount: number
+  matched: boolean
+  skipped: boolean
+  reason?: string
+}
+
+interface ReconcileResult {
+  ok: boolean
+  scannedTransactions: number
+  usdcTransfersFound: number
+  matchedTopups: number
+  unmatchedDeposits: number
+  duplicatesIgnored: number
+  expiredTopups: number
+  errors: string[]
+  details: ReconcileDetail[]
+}
+
+interface TxSigCheckResult {
+  ok: boolean
+  found?: boolean
+  message?: string
+  error?: string
+  results?: Array<{ matched: boolean; skipped: boolean; reason?: string; amount: number; sender: string }>
+}
+
 export default function AdminPage() {
-  const { publicKey } = useWallet()
+  const { publicKey, connecting } = useWallet()
   const { setVisible: openWalletModal } = useWalletModal()
   const connectedAddress = publicKey?.toBase58() ?? ''
 
+  const [mounted, setMounted] = useState(false)
   const [authed, setAuthed] = useState(false)
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
@@ -203,22 +234,30 @@ export default function AdminPage() {
   const [newExcludedLabel, setNewExcludedLabel] = useState('')
   const [currentEpochData, setCurrentEpochData] = useState<CurrentEpochData | null>(null)
   const [epochCountdown, setEpochCountdown] = useState('')
+  const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null)
+  const [reconcileRunning, setReconcileRunning] = useState(false)
+  const [txSigInputs, setTxSigInputs] = useState<Record<string, string>>({})
+  const [txSigResults, setTxSigResults] = useState<Record<string, TxSigCheckResult>>({})
+  const [txSigRunning, setTxSigRunning] = useState<Record<string, boolean>>({})
+
+  // Hydration guard
+  useEffect(() => { setMounted(true) }, [])
 
   // Fetch server-side wallet match info whenever connected wallet changes
   useEffect(() => {
+    setDebugAuth(null) // reset immediately on wallet change (avoids stale state)
+    const controller = new AbortController()
     const url = connectedAddress
       ? `/api/admin/debug-auth?wallet=${encodeURIComponent(connectedAddress)}`
       : '/api/admin/debug-auth'
-    fetch(url)
+    fetch(url, { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((d: DebugAuth | null) => {
         setDebugAuth(d)
-        // If an existing session is still valid, skip password re-entry
-        if (d?.isAdminSession && d?.walletMatch) {
-          setAuthed(true)
-        }
+        if (d?.isAdminSession && d?.walletMatch) setAuthed(true)
       })
-      .catch(() => setDebugAuth(null))
+      .catch((err) => { if (err.name !== 'AbortError') setDebugAuth(null) })
+    return () => controller.abort()
   }, [connectedAddress])
 
   // Revoke access when admin wallet disconnects or changes away from admin wallet
@@ -506,6 +545,57 @@ export default function AdminPage() {
     }
   }
 
+  const runReconcile = async () => {
+    setReconcileRunning(true)
+    setReconcileResult(null)
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reconcile' }),
+      })
+      const d = await res.json()
+      setReconcileResult(d)
+      if (res.ok) load()
+    } catch {
+      setReconcileResult({
+        ok: false, scannedTransactions: 0, usdcTransfersFound: 0, matchedTopups: 0,
+        unmatchedDeposits: 0, duplicatesIgnored: 0, expiredTopups: 0,
+        errors: ['Network error — check console'], details: [],
+      })
+    } finally {
+      setReconcileRunning(false)
+    }
+  }
+
+  const checkTxSig = async (topupId: string) => {
+    const sig = txSigInputs[topupId]?.trim()
+    if (!sig) return
+    setTxSigRunning((r) => ({ ...r, [topupId]: true }))
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'check_tx_signature', signature: sig }),
+      })
+      const d = await res.json()
+      setTxSigResults((r) => ({ ...r, [topupId]: d }))
+      if (res.ok && d.ok) load()
+    } catch {
+      setTxSigResults((r) => ({ ...r, [topupId]: { ok: false, error: 'Network error' } }))
+    } finally {
+      setTxSigRunning((r) => ({ ...r, [topupId]: false }))
+    }
+  }
+
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-white/30 text-sm animate-pulse">Loading…</div>
+      </div>
+    )
+  }
+
   if (!authed) {
     // Debug info panel — shown on all login screens
     const DebugPanel = () => (
@@ -536,21 +626,27 @@ export default function AdminPage() {
       </div>
     )
 
-    // Step 1: no wallet connected
+    // Step 1: no wallet connected (or connecting)
     if (!publicKey) {
       return (
         <div className="min-h-screen flex items-center justify-center px-4">
           <div className="w-full max-w-xs text-center">
             <h1 className="text-xl font-black text-amber-400 mb-4">Admin</h1>
-            <p className="text-white/50 text-sm mb-6">Connect the admin wallet to continue.</p>
-            <button
-              onClick={() => openWalletModal(true)}
-              className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-6 py-2.5 rounded-lg text-sm transition-colors"
-            >
-              Connect Wallet
-            </button>
-            {!debugAuth?.hasAdminWalletEnv && debugAuth !== null && (
-              <p className="text-red-400/70 text-xs mt-4">ADMIN_WALLET is not configured.</p>
+            {connecting ? (
+              <p className="text-white/30 text-sm animate-pulse mb-6">Connecting wallet…</p>
+            ) : (
+              <>
+                <p className="text-white/50 text-sm mb-6">Connect the admin wallet to continue.</p>
+                <button
+                  onClick={() => openWalletModal(true)}
+                  className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-6 py-2.5 rounded-lg text-sm transition-colors"
+                >
+                  Connect Wallet
+                </button>
+                {!debugAuth?.hasAdminWalletEnv && debugAuth !== null && (
+                  <p className="text-red-400/70 text-xs mt-4">ADMIN_WALLET is not configured.</p>
+                )}
+              </>
             )}
             <DebugPanel />
           </div>
@@ -1085,43 +1181,145 @@ export default function AdminPage() {
                   ))}
                 </div>
                 <button
-                  onClick={() => act('reconcile')}
-                  className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded transition-colors"
+                  onClick={runReconcile}
+                  disabled={reconcileRunning}
+                  className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
                 >
-                  Run reconciliation
+                  {reconcileRunning ? 'Running…' : 'Run reconciliation'}
                 </button>
               </div>
+
+              {/* Reconcile result panel */}
+              {reconcileResult && (
+                <div className={`border rounded-xl p-4 space-y-3 ${reconcileResult.ok ? 'border-blue-500/30 bg-blue-500/5' : 'border-red-500/30 bg-red-500/5'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-white">Reconciliation Result</div>
+                    <button onClick={() => setReconcileResult(null)} className="text-white/30 text-xs hover:text-white transition-colors">✕</button>
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                    {[
+                      { label: 'Scanned', v: reconcileResult.scannedTransactions, color: '' },
+                      { label: 'USDC found', v: reconcileResult.usdcTransfersFound, color: '' },
+                      { label: 'Matched', v: reconcileResult.matchedTopups, color: reconcileResult.matchedTopups > 0 ? 'text-green-400' : '' },
+                      { label: 'Unmatched', v: reconcileResult.unmatchedDeposits, color: reconcileResult.unmatchedDeposits > 0 ? 'text-amber-400' : '' },
+                      { label: 'Duplicates', v: reconcileResult.duplicatesIgnored, color: '' },
+                      { label: 'Expired', v: reconcileResult.expiredTopups, color: '' },
+                    ].map(({ label, v, color }) => (
+                      <div key={label} className="bg-white/3 rounded p-2">
+                        <div className={`font-mono font-bold text-sm ${color || 'text-white'}`}>{v}</div>
+                        <div className="text-white/30 text-[10px]">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {reconcileResult.errors.length > 0 && (
+                    <div className="space-y-1">
+                      {reconcileResult.errors.map((err, i) => (
+                        <div key={i} className="text-red-400 text-[10px] font-mono">{err}</div>
+                      ))}
+                    </div>
+                  )}
+                  {reconcileResult.details.length > 0 && (
+                    <div className="space-y-1 max-h-48 overflow-y-auto">
+                      {reconcileResult.details.map((d, i) => (
+                        <div key={i} className={`flex items-center gap-2 text-[10px] font-mono ${d.matched ? 'text-green-400/70' : d.skipped ? 'text-white/30' : 'text-amber-400/70'}`}>
+                          <span className="flex-shrink-0">{d.matched ? '✓' : d.skipped ? '·' : '?'}</span>
+                          <span>{d.signature.slice(0, 12)}…</span>
+                          <span>${d.amount.toFixed(4)}</span>
+                          <span>{d.matched ? 'matched' : d.skipped ? `skip(${d.reason})` : `unmatched(${d.reason})`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {topupSubview === 'pending' && (
                 <div className="space-y-2">
                   {topupData.pending.length === 0 ? (
                     <p className="text-white/30 text-sm text-center py-8">No pending top-ups.</p>
                   ) : topupData.pending.map((t) => (
-                    <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-0.5 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${
-                            t.status === 'PENDING' ? 'bg-amber-400/10 text-amber-400' : 'bg-white/10 text-white/40'
-                          }`}>{t.status}</span>
-                          <span className="text-white/50 text-xs">{t.user.email ?? t.userId}</span>
+                    <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                      {/* Header */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${
+                              t.status === 'PENDING' ? 'bg-amber-400/10 text-amber-400' : 'bg-white/10 text-white/40'
+                            }`}>{t.status}</span>
+                            <span className="text-white font-mono font-bold text-sm">
+                              ${Number(t.amount).toFixed(2)} USDC
+                            </span>
+                            <span className="text-white/50 text-xs">{t.user.email ?? t.userId.slice(0, 8) + '…'}</span>
+                          </div>
+                          <div className="text-white/20 text-[10px] font-mono">ID: {t.id}</div>
                         </div>
-                        <div className="text-white/30 text-[10px] font-mono truncate">
-                          From: {t.advertiserWallet ?? '—'}
+                        <button
+                          onClick={() => act('expire_topup', { topupId: t.id })}
+                          className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors flex-shrink-0"
+                        >
+                          Expire
+                        </button>
+                      </div>
+
+                      {/* Wallet info */}
+                      <div className="space-y-1">
+                        <div className="text-[10px] font-mono break-all">
+                          <span className="text-white/30">From: </span>
+                          <span className="text-white/60">{t.advertiserWallet ?? '—'}</span>
                         </div>
-                        <div className="text-white/30 text-[10px] font-mono truncate">
-                          To: {t.depositWallet ?? '—'}
+                        <div className="text-[10px] font-mono break-all">
+                          <span className="text-white/30">To: </span>
+                          <span className="text-white/60">{t.depositWallet ?? '—'}</span>
                         </div>
-                        <div className="text-white/30 text-[10px]">
+                        <div className="text-[10px] text-white/30">
                           Created: {new Date(t.createdAt).toLocaleString()}
                           {t.expiresAt && ` · Expires: ${new Date(t.expiresAt).toLocaleString()}`}
                         </div>
+                        {t.txSignature && (
+                          <a
+                            href={`https://solscan.io/tx/${t.txSignature}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono block"
+                          >
+                            {t.txSignature.slice(0, 20)}… ↗
+                          </a>
+                        )}
                       </div>
-                      <button
-                        onClick={() => act('expire_topup', { topupId: t.id })}
-                        className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
-                      >
-                        Expire
-                      </button>
+
+                      {/* Manual tx recovery */}
+                      <div className="space-y-1.5 pt-1 border-t border-white/5">
+                        <div className="text-[10px] text-white/25 uppercase tracking-widest">Manual tx recovery</div>
+                        <div className="flex gap-2">
+                          <input
+                            value={txSigInputs[t.id] ?? ''}
+                            onChange={(e) => setTxSigInputs((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                            placeholder="Paste Solscan tx signature…"
+                            className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-[10px] font-mono focus:outline-none focus:border-blue-400 placeholder-white/20"
+                          />
+                          <button
+                            onClick={() => checkTxSig(t.id)}
+                            disabled={!txSigInputs[t.id]?.trim() || !!txSigRunning[t.id]}
+                            className="text-[10px] bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-2 py-1 rounded transition-colors disabled:opacity-50 flex-shrink-0"
+                          >
+                            {txSigRunning[t.id] ? '…' : 'Check'}
+                          </button>
+                        </div>
+                        {txSigResults[t.id] && (() => {
+                          const r = txSigResults[t.id]
+                          if (r.error) return <div className="text-red-400 text-[10px]">{r.error}</div>
+                          if (!r.found) return <div className="text-amber-400 text-[10px]">{r.message}</div>
+                          return (
+                            <div className="space-y-1">
+                              {r.results?.map((res, i) => (
+                                <div key={i} className={`text-[10px] font-mono ${res.matched ? 'text-green-400' : res.skipped ? 'text-white/50' : 'text-amber-400'}`}>
+                                  ${res.amount.toFixed(4)} from {res.sender.slice(0, 8)}… — {res.matched ? 'Matched & credited ✓' : res.skipped ? `Duplicate (${res.reason})` : `Unmatched (${res.reason})`}
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        })()}
+                      </div>
                     </div>
                   ))}
                 </div>

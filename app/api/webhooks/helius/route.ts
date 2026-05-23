@@ -7,6 +7,9 @@ import type { HeliusTransaction } from '@/lib/usdc-topup'
 export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization')
   const secret = env.cronSecret
+  if (!secret && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'Webhook auth not configured — set CRON_SECRET' }, { status: 503 })
+  }
   if (secret && authHeader !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }

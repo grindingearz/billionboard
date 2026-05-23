@@ -21,8 +21,12 @@ export async function POST(req: Request) {
   const today = utcDayStart(new Date())
 
   const existing = await prisma.dailyBillingRun.findUnique({ where: { runDate: today } })
-  if (existing) {
+  if (existing?.status === 'completed') {
     return NextResponse.json({ error: 'Billing already run today', run: existing }, { status: 409 })
+  }
+  // Abandoned 'pending' run (server crash mid-billing) — delete and restart cleanly
+  if (existing?.status === 'pending') {
+    await prisma.dailyBillingRun.delete({ where: { id: existing.id } })
   }
 
   const activeRentals = await prisma.adRental.findMany({

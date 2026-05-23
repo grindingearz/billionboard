@@ -84,17 +84,21 @@ export async function POST(req: Request) {
     })
   }
 
-  // TODO: execute real Solana USDC transfer from DISTRIBUTION_WALLET
+  // Payout execution is not yet implemented — register as PENDING until Solana transfer is wired up.
+  // Never set status: 'CLAIMED' without a confirmed on-chain txHash.
   const claim = await prisma.claim.create({
     data: {
       epochId,
       walletAddress: wallet,
       amount: snapshot.claimAmount,
-      status: 'CLAIMED',
-      claimedAt: new Date(),
-      txHash: null, // populated after Solana tx confirmed
+      status: 'PENDING',
     },
   })
 
-  return NextResponse.json({ ok: true, claim })
+  return NextResponse.json({
+    ok: true,
+    claim,
+    payoutPending: true,
+    message: 'Claim registered. Payout processing is pending — USDC will be sent once the transfer is executed.',
+  })
 }

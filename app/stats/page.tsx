@@ -1,15 +1,14 @@
 import { prisma } from '@/lib/prisma'
 import { TOTAL_TILES } from '@/lib/types'
-import { getTilePrice } from '@/lib/settings'
+import { getTilePrice, getSetting } from '@/lib/settings'
 
 async function getStats() {
   try {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const todayEnd = new Date(today)
-    todayEnd.setHours(23, 59, 59, 999)
+    const now = new Date()
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    const todayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999))
 
-    const [activeTiles, pendingTiles, revenueAgg, billingRuns, epochs, todayAd, todayFee, totalDistributed, tilePrice] =
+    const [activeTiles, pendingTiles, revenueAgg, billingRuns, epochs, todayAd, todayFee, totalDistributed, tilePrice, feePercentStr] =
       await Promise.all([
         prisma.adRental.count({ where: { status: 'ACTIVE' } }),
         prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
@@ -47,12 +46,14 @@ async function getStats() {
           _sum: { amount: true },
         }),
         getTilePrice(),
+        getSetting('management_fee_percent'),
       ])
 
     const todayAdRevenue = Number(todayAd._sum.amount ?? 0)
     const todayFeeRevenue = Number(todayFee._sum.amount ?? 0)
     const todayGross = todayAdRevenue + todayFeeRevenue
-    const todayMgmtFee = todayGross * 0.1
+    const feePercent = Math.max(0, Math.min(100, parseFloat(feePercentStr) || 10))
+    const todayMgmtFee = todayGross * (feePercent / 100)
     const todayClaimPool = todayGross - todayMgmtFee
 
     return {
@@ -62,6 +63,7 @@ async function getStats() {
       totalRevenue: Number(revenueAgg._sum.amount ?? 0),
       totalDistributed: Number(totalDistributed._sum.amount ?? 0),
       tilePrice,
+      feePercent,
       today: {
         adRevenue: todayAdRevenue,
         feeRevenue: todayFeeRevenue,
@@ -80,6 +82,7 @@ async function getStats() {
       totalRevenue: 0,
       totalDistributed: 0,
       tilePrice: 1,
+      feePercent: 10,
       today: { adRevenue: 0, feeRevenue: 0, grossPool: 0, managementFee: 0, claimPool: 0 },
       billingRuns: [],
       epochs: [],
@@ -140,7 +143,7 @@ export default async function StatsPage() {
               { label: 'Ad rent revenue', value: `$${fmt(s.today.adRevenue)}`, color: 'text-green-400' },
               { label: 'Trading fee revenue', value: `$${fmt(s.today.feeRevenue)}`, color: 'text-blue-400' },
               { label: 'Gross pool', value: `$${fmt(s.today.grossPool)}`, color: 'text-white' },
-              { label: 'Management fee (10%)', value: `$${fmt(s.today.managementFee)}`, color: 'text-white/50' },
+              { label: `Management fee (${s.feePercent}%)`, value: `$${fmt(s.today.managementFee)}`, color: 'text-white/50' },
               { label: 'Claim pool', value: `$${fmt(s.today.claimPool)}`, color: 'text-green-400' },
               { label: 'Total distributed', value: `$${fmt(s.totalDistributed)}`, color: 'text-white/70' },
             ].map(({ label, value, color }) => (

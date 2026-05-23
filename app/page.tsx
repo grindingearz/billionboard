@@ -26,7 +26,6 @@ async function getTileData(): Promise<TileInfoMap> {
         status: true,
         creativeId: true,
         creative: { select: { imageUrl: true, destUrl: true, altText: true, displayMode: true } },
-        user: { select: { email: true } },
       },
     })
     const tiles: TileInfoMap = {}
@@ -37,7 +36,6 @@ async function getTileData(): Promise<TileInfoMap> {
         imageUrl: r.creative?.imageUrl ?? undefined,
         destUrl: r.creative?.destUrl ?? undefined,
         altText: r.creative?.altText ?? undefined,
-        advertiserEmail: r.user?.email ?? undefined,
         displayMode: (r.creative?.displayMode ?? 'REPEAT') as 'REPEAT' | 'STRETCH',
       }
     }
