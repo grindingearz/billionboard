@@ -28,6 +28,9 @@ interface BillboardProps {
     canvas: HTMLCanvasElement
   }) => void
   onCursorLeave?: () => void
+  selectionMode?: 'click' | 'box'
+  /** Called with every tile ID inside the dragged rectangle when mouse is released. */
+  onBoxSelect?: (tileIds: number[]) => void
 }
 
 const SELECTED_COLOR = '#2563eb'
@@ -43,12 +46,21 @@ export default function Billboard({
   className = '',
   onCursorMove,
   onCursorLeave,
+  selectionMode = 'click',
+  onBoxSelect,
 }: BillboardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const hoveredTile = useRef<number | null>(null)
   const imageCache = useRef<Map<string, HTMLImageElement | 'loading' | 'error'>>(new Map())
   const [imageVersion, setImageVersion] = useState(0)
+
+  // Box-select drag state (refs to avoid stale closures in global listener)
+  const dragStartRef = useRef<{ col: number; row: number } | null>(null)
+  const dragEndRef = useRef<{ col: number; row: number } | null>(null)
+  const isDraggingRef = useRef(false)
+  const onBoxSelectRef = useRef(onBoxSelect)
+  useEffect(() => { onBoxSelectRef.current = onBoxSelect }, [onBoxSelect])
 
   const [tooltip, setTooltip] = useState<{
     x: number
@@ -58,6 +70,14 @@ export default function Billboard({
     row: number
     status: TileStatus
   } | null>(null)
+
+  // Clear tooltip when switching to box mode
+  useEffect(() => {
+    if (selectionMode === 'box') {
+      setTooltip(null)
+      hoveredTile.current = null
+    }
+  }, [selectionMode])
 
   const getTileId = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -72,6 +92,24 @@ export default function Billboard({
       const row = Math.floor(y / pixelSize)
       if (col < 0 || col >= BOARD_COLUMNS || row < 0 || row >= BOARD_ROWS) return null
       return col + row * BOARD_COLUMNS
+    },
+    [pixelSize]
+  )
+
+  // Returns tile coords clamped to board bounds — used for box select drag
+  const getClampedCoords = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>): { col: number; row: number } => {
+      const canvas = canvasRef.current
+      if (!canvas) return { col: 0, row: 0 }
+      const rect = canvas.getBoundingClientRect()
+      const scaleX = (BOARD_COLUMNS * pixelSize) / rect.width
+      const scaleY = (BOARD_ROWS * pixelSize) / rect.height
+      const x = (e.clientX - rect.left) * scaleX
+      const y = (e.clientY - rect.top) * scaleY
+      return {
+        col: Math.max(0, Math.min(BOARD_COLUMNS - 1, Math.floor(x / pixelSize))),
+        row: Math.max(0, Math.min(BOARD_ROWS - 1, Math.floor(y / pixelSize))),
+      }
     },
     [pixelSize]
   )
@@ -267,8 +305,6 @@ export default function Billboard({
   }, [tiles, selectedTiles, pixelSize])
 
   // Preload creative images whenever tiles change.
-  // No crossOrigin — R2 public URLs load fine without it, and the Loupe only
-  // uses drawImage (not getImageData/toDataURL), so CORS is not required.
   useEffect(() => {
     const needed = new Map<string, string>()
     for (const info of Object.values(tiles)) {
@@ -318,9 +354,135 @@ export default function Billboard({
     [pixelSize]
   )
 
+  // Draw drag-select rectangle on the overlay canvas
+  const renderBoxOverlay = useCallback(
+    (start: { col: number; row: number }, end: { col: number; row: number }) => {
+      const canvas = overlayRef.current
+      if (!canvas) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+      const minCol = Math.min(start.col, end.col)
+      const maxCol = Math.max(start.col, end.col)
+      const minRow = Math.min(start.row, end.row)
+      const maxRow = Math.max(start.row, end.row)
+
+      // Check for unavailable tiles in the dragged range
+      let hasBlocked = false
+      for (let r = minRow; r <= maxRow && !hasBlocked; r++) {
+        for (let c = minCol; c <= maxCol && !hasBlocked; c++) {
+          const s = tiles[c + r * BOARD_COLUMNS]?.status
+          if (s === 'ACTIVE' || s === 'PENDING') hasBlocked = true
+        }
+      }
+
+      const x = minCol * pixelSize
+      const y = minRow * pixelSize
+      const w = (maxCol - minCol + 1) * pixelSize
+      const h = (maxRow - minRow + 1) * pixelSize
+      const lw = Math.max(1, pixelSize * 0.3)
+
+      ctx.fillStyle = hasBlocked ? 'rgba(245,158,11,0.12)' : 'rgba(37,99,235,0.18)'
+      ctx.fillRect(x, y, w, h)
+
+      ctx.save()
+      ctx.strokeStyle = hasBlocked ? 'rgba(251,191,36,0.9)' : 'rgba(96,165,250,0.9)'
+      ctx.lineWidth = lw
+      ctx.setLineDash([pixelSize * 2, pixelSize])
+      ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw)
+      ctx.setLineDash([])
+      ctx.restore()
+
+      // Dimension label
+      const cols = maxCol - minCol + 1
+      const rows = maxRow - minRow + 1
+      const fontSize = Math.max(9, Math.min(pixelSize * 2.5, 18))
+      if (w > fontSize * 3 && h > fontSize * 1.5) {
+        ctx.save()
+        ctx.font = `bold ${fontSize}px ui-monospace, monospace`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillStyle = hasBlocked ? 'rgba(251,191,36,0.95)' : 'rgba(255,255,255,0.95)'
+        ctx.shadowColor = 'rgba(0,0,0,0.9)'
+        ctx.shadowBlur = 4
+        ctx.fillText(`${cols}×${rows}`, x + w / 2, y + h / 2)
+        ctx.restore()
+      }
+    },
+    [tiles, pixelSize]
+  )
+
+  // Global mouseup: commits the box selection even if released outside the canvas
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (!isDraggingRef.current || !dragStartRef.current) return
+      const start = dragStartRef.current
+      const end = dragEndRef.current ?? start
+
+      isDraggingRef.current = false
+      dragStartRef.current = null
+      dragEndRef.current = null
+
+      const canvas = overlayRef.current
+      if (canvas) canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+
+      const minCol = Math.min(start.col, end.col)
+      const maxCol = Math.max(start.col, end.col)
+      const minRow = Math.min(start.row, end.row)
+      const maxRow = Math.max(start.row, end.row)
+
+      const tileIds: number[] = []
+      for (let r = minRow; r <= maxRow; r++) {
+        for (let c = minCol; c <= maxCol; c++) {
+          tileIds.push(c + r * BOARD_COLUMNS)
+        }
+      }
+      onBoxSelectRef.current?.(tileIds)
+    }
+    window.addEventListener('mouseup', handleGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
+  }, [])
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!interactive || selectionMode !== 'box') return
+      e.preventDefault()
+      const coords = getClampedCoords(e)
+      dragStartRef.current = coords
+      dragEndRef.current = coords
+      isDraggingRef.current = true
+      renderBoxOverlay(coords, coords)
+    },
+    [interactive, selectionMode, getClampedCoords, renderBoxOverlay]
+  )
+
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!interactive) return
+
+      if (selectionMode === 'box') {
+        const coords = getClampedCoords(e)
+        if (isDraggingRef.current && dragStartRef.current) {
+          dragEndRef.current = coords
+          renderBoxOverlay(dragStartRef.current, coords)
+        }
+        // Still propagate cursor position so Loupe works in box mode
+        if (onCursorMove && canvasRef.current) {
+          const rect = canvasRef.current.getBoundingClientRect()
+          onCursorMove({
+            tileId: getTileId(e),
+            canvasX: e.clientX - rect.left,
+            canvasY: e.clientY - rect.top,
+            viewportX: e.clientX,
+            viewportY: e.clientY,
+            canvas: canvasRef.current,
+          })
+        }
+        return
+      }
+
+      // Click mode: existing hover behavior
       const tileId = getTileId(e)
 
       if (onCursorMove && canvasRef.current) {
@@ -335,7 +497,6 @@ export default function Billboard({
         })
       }
 
-      // Update cursor: pointer for active tiles with a destUrl
       if (overlayRef.current) {
         const info = tileId !== null ? tiles[tileId] : undefined
         overlayRef.current.style.cursor =
@@ -361,23 +522,27 @@ export default function Billboard({
         setTooltip(null)
       }
     },
-    [interactive, getTileId, renderOverlay, tiles, onCursorMove]
+    [interactive, selectionMode, getClampedCoords, renderBoxOverlay, getTileId, onCursorMove, renderOverlay, tiles]
   )
 
   const handleMouseLeave = useCallback(() => {
-    hoveredTile.current = null
-    renderOverlay(null)
-    setTooltip(null)
-    onCursorLeave?.()
+    // If dragging and mouse leaves the canvas, keep drag alive —
+    // the global mouseup listener will commit it when the user releases.
+    if (!isDraggingRef.current) {
+      hoveredTile.current = null
+      renderOverlay(null)
+      setTooltip(null)
+      onCursorLeave?.()
+    }
   }, [renderOverlay, onCursorLeave])
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!interactive) return
+      if (!interactive || selectionMode === 'box') return
       const tileId = getTileId(e)
       if (tileId !== null) onTileClick?.(tileId)
     },
-    [interactive, getTileId, onTileClick]
+    [interactive, selectionMode, getTileId, onTileClick]
   )
 
   const width = BOARD_COLUMNS * pixelSize
@@ -400,14 +565,18 @@ export default function Billboard({
           ref={overlayRef}
           width={width}
           height={height}
-          className="absolute inset-0 w-full h-full cursor-crosshair"
-          style={{ imageRendering: 'pixelated' }}
+          className="absolute inset-0 w-full h-full"
+          style={{
+            imageRendering: 'pixelated',
+            cursor: selectionMode === 'box' ? 'crosshair' : 'crosshair',
+          }}
+          onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
           onClick={handleClick}
         />
       )}
-      {tooltip && (
+      {tooltip && selectionMode !== 'box' && (
         <div
           className="pointer-events-none absolute z-10 rounded bg-black/90 border border-white/10 px-2 py-1.5 text-xs text-white whitespace-nowrap"
           style={{ left: tooltip.x + 14, top: tooltip.y - 36 }}

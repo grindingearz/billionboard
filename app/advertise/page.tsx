@@ -60,6 +60,9 @@ export default function AdvertisePage() {
   const [topupSuccess, setTopupSuccess] = useState(false)
 
   // Zoom / pan state for the tile selector
+  const [selectionMode, setSelectionMode] = useState<'click' | 'box'>('click')
+  const [boxSelectError, setBoxSelectError] = useState('')
+
   const [zoomIdx, setZoomIdx] = useState(2)
   const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
   const boardContainerRef = useRef<HTMLDivElement>(null)
@@ -412,6 +415,22 @@ export default function AdvertisePage() {
     [tiles]
   )
 
+  const handleBoxSelect = useCallback(
+    (tileIds: number[]) => {
+      setBoxSelectError('')
+      const blocked = tileIds.filter((id) => {
+        const s = tiles[id]?.status
+        return s === 'ACTIVE' || s === 'PENDING'
+      })
+      if (blocked.length > 0) {
+        setBoxSelectError('This block contains unavailable tiles. Choose another area.')
+        return
+      }
+      setSelectedTiles(new Set(tileIds))
+    },
+    [tiles]
+  )
+
   const handleSubmit = async () => {
     setSubmitting(true)
     setError('')
@@ -734,6 +753,8 @@ export default function AdvertisePage() {
                     className="w-full h-full"
                     onCursorMove={handleCursorMove}
                     onCursorLeave={handleCursorLeave}
+                    selectionMode={selectionMode}
+                    onBoxSelect={handleBoxSelect}
                   />
                 </div>
               )}
@@ -758,8 +779,35 @@ export default function AdvertisePage() {
             />
           )}
 
-          {/* Floating bottom-left: zoom controls + legend */}
+          {/* Floating bottom-left: selection mode + zoom controls + legend */}
           <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-2 items-start">
+            {/* Selection mode toggle */}
+            <div className="flex items-center bg-black/80 border border-white/10 rounded-lg overflow-hidden">
+              <button
+                onClick={() => { setSelectionMode('click'); setBoxSelectError('') }}
+                className={`px-3 py-1.5 text-xs transition-colors ${
+                  selectionMode === 'click'
+                    ? 'bg-blue-600/30 text-blue-300 font-semibold'
+                    : 'text-white/40 hover:text-white/70'
+                }`}
+                title="Click individual tiles to select or deselect"
+              >
+                Click Select
+              </button>
+              <div className="w-px h-4 bg-white/10" />
+              <button
+                onClick={() => { setSelectionMode('box'); setBoxSelectError('') }}
+                className={`px-3 py-1.5 text-xs transition-colors ${
+                  selectionMode === 'box'
+                    ? 'bg-blue-600/30 text-blue-300 font-semibold'
+                    : 'text-white/40 hover:text-white/70'
+                }`}
+                title="Drag to select a rectangular block of tiles"
+              >
+                Box Select
+              </button>
+            </div>
+
             {/* Legend */}
             <div className="flex items-center gap-3 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white/40">
               <span className="flex items-center gap-1">
@@ -825,13 +873,62 @@ export default function AdvertisePage() {
             </div>
           </div>
 
-          {/* Floating bottom-right: hint + next button */}
+          {/* Floating bottom-right: hints + action bar */}
           <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-2">
-            {selectedTiles.size === 0 && (
-              <div className="text-xs text-white/30 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5">
-                Click tiles to select · zoom in for precision
+            {/* Box select error */}
+            {boxSelectError && (
+              <div className="text-xs text-amber-400 bg-black/90 border border-amber-400/20 rounded-lg px-3 py-2 max-w-[280px] text-right">
+                {boxSelectError}
               </div>
             )}
+
+            {/* Hint when nothing selected */}
+            {selectedTiles.size === 0 && !boxSelectError && (
+              <div className="text-xs text-white/30 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+                {selectionMode === 'click'
+                  ? 'Click tiles to select · Tip: use Box Select for larger blocks'
+                  : 'Click and drag to select a rectangular block'}
+              </div>
+            )}
+
+            {/* Block info when selection exists */}
+            {selectedTiles.size > 0 && blockInfo && (
+              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+                <span className="text-blue-300 font-mono">
+                  {blockInfo.cols} × {blockInfo.rows} block = {selectedTiles.size} tiles
+                </span>
+                <span className="text-white/30 mx-1.5">·</span>
+                <span className="text-green-400">
+                  {freeRental.enabled
+                    ? 'Free'
+                    : `$${(selectedTiles.size * tilePrice) % 1 === 0 ? selectedTiles.size * tilePrice : (selectedTiles.size * tilePrice).toFixed(2)}/day`}
+                </span>
+              </div>
+            )}
+
+            {/* Tile count when selection is not a rectangle */}
+            {selectedTiles.size > 0 && !blockInfo && (
+              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+                <span className="text-white/60 font-mono">{selectedTiles.size} tiles</span>
+                <span className="text-white/30 mx-1.5">·</span>
+                <span className="text-green-400">
+                  {freeRental.enabled
+                    ? 'Free'
+                    : `$${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}
+                </span>
+              </div>
+            )}
+
+            {/* Clear selection */}
+            {selectedTiles.size > 0 && (
+              <button
+                onClick={() => { setSelectedTiles(new Set()); setBoxSelectError('') }}
+                className="text-xs text-white/40 hover:text-white/70 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 transition-colors"
+              >
+                Clear selection
+              </button>
+            )}
+
             <button
               onClick={() => setStep('creative')}
               disabled={selectedTiles.size === 0}
@@ -938,7 +1035,12 @@ export default function AdvertisePage() {
               )}
               {displayMode === 'STRETCH' && !blockInfo && selectedTiles.size > 0 && (
                 <p className="text-xs text-amber-400/70 mt-2">
-                  Your current selection is not a rectangle. Switch to Repeat or reselect a rectangular block.
+                  Your selection is not a rectangle. Go back and use Box Select to drag a clean block, or switch to Repeat mode.
+                </p>
+              )}
+              {displayMode === 'STRETCH' && selectedTiles.size === 0 && (
+                <p className="text-xs text-blue-400/60 mt-2">
+                  Tip: use Box Select on the previous step to drag a rectangle in one move.
                 </p>
               )}
               {displayModeError && (
