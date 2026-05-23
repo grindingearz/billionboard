@@ -6,7 +6,7 @@ import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import Billboard from '@/components/Billboard'
 import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
-import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection } from '@/lib/types'
+import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection, runRectangularSelectionTests } from '@/lib/types'
 import type { TileInfoMap, DisplayMode } from '@/lib/types'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
@@ -26,7 +26,6 @@ export default function AdvertisePage() {
   const { publicKey } = useWallet()
   const { setVisible: openWalletModal } = useWalletModal()
   const [authState, setAuthState] = useState<AuthState>('idle')
-  const [email, setEmail] = useState('')
   const [balance, setBalance] = useState<number | null>(null)
   const [tiles, setTiles] = useState<TileInfoMap>({})
   const [tilePrice, setTilePrice] = useState(1)
@@ -192,6 +191,30 @@ export default function AdvertisePage() {
     loadSettings()
   }, [loadTiles, loadBalance, loadSettings])
 
+  // Dev: verify rectangular selection logic on mount; check browser console for results
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production') {
+      runRectangularSelectionTests()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Auto-authenticate when wallet connects and no session exists yet
+  useEffect(() => {
+    if (!publicKey || authState === 'logged_in') return
+    const addr = publicKey.toBase58()
+    setAuthState('logging_in')
+    fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ walletAddress: addr }),
+    })
+      .then((r) => r.json())
+      .then((d) => { if (d.ok) loadBalance(); else setAuthState('idle') })
+      .catch(() => setAuthState('idle'))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicKey])
+
   // Auto-save connected wallet address to advertiser account
   useEffect(() => {
     if (!publicKey || authState !== 'logged_in') return
@@ -206,21 +229,6 @@ export default function AdvertisePage() {
       .then((d) => { if (d.ok) setWalletAddress(addr) })
       .catch(() => {})
   }, [publicKey, authState, walletAddress])
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setAuthState('logging_in')
-    const res = await fetch('/api/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    })
-    if (res.ok) {
-      await loadBalance()
-    } else {
-      setAuthState('idle')
-    }
-  }
 
   const handleSaveWallet = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -341,6 +349,11 @@ export default function AdvertisePage() {
   const handleSubmit = async () => {
     setSubmitting(true)
     setError('')
+    if (!publicKey) {
+      setError('Connect your wallet to submit your ad.')
+      setSubmitting(false)
+      return
+    }
     if (process.env.NODE_ENV === 'development') {
       console.log('[advertise] submitting imageUrl:', form.imageUrl)
     }
@@ -385,33 +398,23 @@ export default function AdvertisePage() {
     return { cols: maxCol - minCol + 1, rows: maxRow - minRow + 1 }
   }, [selectedTiles])
 
-  // ── Login screen ────────────────────────────────────────────────────────────
+  // ── Connect wallet screen ────────────────────────────────────────────────────
   if (authState !== 'logged_in') {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
-        <div className="w-full max-w-sm">
-          <h1 className="text-2xl font-black text-white mb-1">Advertise on BillionBoard</h1>
-          <p className="text-white/40 text-sm mb-6">Sign in to select tiles and launch your ad</p>
-          <form onSubmit={handleLogin} className="space-y-3">
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your@email.com"
-              required
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/30 focus:outline-none focus:border-green-400 text-sm"
-            />
+        <div className="w-full max-w-sm text-center">
+          <h1 className="text-2xl font-black text-white mb-2">Advertise on BillionBoard</h1>
+          <p className="text-white/40 text-sm mb-8">Connect your Solana wallet to select tiles and launch your ad.</p>
+          {publicKey ? (
+            <div className="text-white/50 text-sm animate-pulse">Signing in…</div>
+          ) : (
             <button
-              type="submit"
-              disabled={authState === 'logging_in'}
-              className="w-full bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black font-bold py-3 rounded-lg text-sm transition-colors"
+              onClick={() => openWalletModal(true)}
+              className="bg-green-400 hover:bg-green-300 text-black font-bold px-8 py-3 rounded-xl text-sm transition-colors"
             >
-              {authState === 'logging_in' ? 'Signing in…' : 'Continue with email'}
+              Connect Wallet
             </button>
-          </form>
-          <p className="text-center text-white/20 text-xs mt-4">
-            Wallet connect coming after $BOARD launch
-          </p>
+          )}
         </div>
       </div>
     )
@@ -944,6 +947,18 @@ export default function AdvertisePage() {
               </div>
             )}
 
+            {!publicKey && (
+              <div className="bg-amber-900/30 border border-amber-500/30 rounded-lg p-3 text-amber-400 text-sm flex items-center justify-between">
+                <span>Connect your wallet to submit your ad.</span>
+                <button
+                  onClick={() => openWalletModal(true)}
+                  className="text-xs bg-amber-400/20 hover:bg-amber-400/30 text-amber-400 px-3 py-1.5 rounded transition-colors ml-3 flex-shrink-0"
+                >
+                  Connect
+                </button>
+              </div>
+            )}
+
             {error && (
               <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
                 {error}
@@ -964,7 +979,7 @@ export default function AdvertisePage() {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={submitting || !canAfford}
+                disabled={submitting || !canAfford || !publicKey}
                 className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
               >
                 {submitting ? 'Submitting…' : 'Submit for approval'}

@@ -36,7 +36,7 @@ model AdvertiserWallet {
   user User @relation(fields: [userId], references: [id])
 }
 
-// tileId = col + row * 1000, range 0–99999
+// tileId = col + row * BOARD_COLUMNS (400), range 0–99999. Board is 400 cols × 250 rows.
 model AdRental {
   id         String       @id @default(cuid())
   userId     String

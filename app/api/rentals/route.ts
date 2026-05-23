@@ -42,10 +42,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Invalid tileId: ${id}` }, { status: 400 })
     }
   }
+  // Deduplicate before further validation (isRectangularSelection also deduplicates internally)
+  const uniqueTileIds: number[] = Array.from(new Set<number>(tileIds))
   if (!destUrl || !imageUrl) {
     return NextResponse.json({ error: 'imageUrl and destUrl required' }, { status: 400 })
   }
-  if (displayMode === 'STRETCH' && !isRectangularSelection(tileIds)) {
+  if (displayMode === 'STRETCH' && !isRectangularSelection(uniqueTileIds)) {
     return NextResponse.json(
       { error: 'Stretch mode requires a rectangular block of connected tiles.' },
       { status: 400 }
@@ -69,7 +71,7 @@ export async function POST(req: Request) {
   // Check tiles are available
   const occupied = await prisma.adRental.findMany({
     where: {
-      tileId: { in: tileIds },
+      tileId: { in: uniqueTileIds },
       status: { in: ['PENDING_APPROVAL', 'ACTIVE'] },
     },
     select: { tileId: true },
@@ -88,7 +90,7 @@ export async function POST(req: Request) {
 
   if (!freeEnabled) {
     // Check sufficient balance (1 day reserve)
-    const requiredBalance = tileIds.length * tilePrice
+    const requiredBalance = uniqueTileIds.length * tilePrice
     const wallet = await prisma.advertiserWallet.findUnique({
       where: { userId: session.userId },
     })
@@ -106,7 +108,7 @@ export async function POST(req: Request) {
       data: { userId: session.userId, imageUrl, destUrl: normalizedDestUrl, altText: altText ?? null, displayMode },
     })
     const rentals = await Promise.all(
-      tileIds.map((tileId: number) =>
+      uniqueTileIds.map((tileId: number) =>
         tx.adRental.create({
           data: {
             userId: session.userId,

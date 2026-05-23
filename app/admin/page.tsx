@@ -18,7 +18,7 @@ interface Rental {
   createdAt: string
   startDate: string | null
   dailyRate: number
-  creative: { imageUrl: string; destUrl: string; altText: string | null; displayMode: string } | null
+  creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
   user: { email: string | null; walletAddress: string | null }
 }
 
@@ -314,18 +314,31 @@ export default function AdminPage() {
                     key={r.id}
                     className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4"
                   >
-                    {r.creative?.imageUrl && (
-                      /* eslint-disable-next-line @next/next/no-img-element */
-                      <img
-                        src={r.creative.imageUrl}
-                        alt={r.creative.altText ?? 'Ad'}
-                        className="w-20 h-20 object-cover rounded border border-white/10 flex-shrink-0"
-                      />
-                    )}
+                    <div className="flex-shrink-0 flex flex-col items-center gap-1">
+                      {r.creative?.imageUrl ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={r.creative.imageUrl}
+                          alt={r.creative.altText ?? 'Ad'}
+                          className="w-20 h-20 object-cover rounded border border-white/10"
+                        />
+                      ) : (
+                        <div className="w-20 h-20 rounded border border-white/10 bg-white/5 flex items-center justify-center">
+                          <span className="text-white/20 text-[10px]">no image</span>
+                        </div>
+                      )}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        r.status === 'ACTIVE'
+                          ? 'bg-green-400/10 text-green-400'
+                          : 'bg-amber-400/10 text-amber-400'
+                      }`}>
+                        {r.status === 'ACTIVE' ? 'LIVE' : 'PENDING'}
+                      </span>
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <div className="text-white font-mono text-sm">Tile #{r.tileId}</div>
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                               r.creative?.displayMode === 'STRETCH'
@@ -335,18 +348,38 @@ export default function AdminPage() {
                               {r.creative?.displayMode === 'STRETCH' ? 'Stretch' : 'Repeat'}
                             </span>
                           </div>
-                          <div className="text-white/40 text-xs truncate">
-                            {r.user.email ?? r.user.walletAddress ?? 'unknown'}
-                          </div>
+                          {r.user.walletAddress ? (
+                            <div className="text-green-400/70 text-xs font-mono truncate mt-0.5" title={r.user.walletAddress}>
+                              {r.user.walletAddress.slice(0, 6)}…{r.user.walletAddress.slice(-4)}
+                            </div>
+                          ) : null}
+                          {r.user.email ? (
+                            <div className="text-white/40 text-xs truncate mt-0.5">{r.user.email}</div>
+                          ) : !r.user.walletAddress ? (
+                            <div className="text-white/20 text-xs mt-0.5">unknown</div>
+                          ) : null}
                           {r.creative?.destUrl && (
                             <a
                               href={r.creative.destUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="text-xs text-green-400 hover:text-green-300 truncate block max-w-xs"
+                              className="text-xs text-green-400 hover:text-green-300 truncate block max-w-xs mt-0.5"
                             >
                               {r.creative.destUrl}
                             </a>
+                          )}
+                          {r.creative?.imageUrl ? (
+                            <a
+                              href={r.creative.imageUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-white/20 hover:text-white/40 font-mono truncate block max-w-xs mt-0.5 transition-colors"
+                              title={r.creative.imageUrl}
+                            >
+                              {r.creative.imageUrl}
+                            </a>
+                          ) : (
+                            <div className="text-[10px] text-red-400/60 mt-0.5">⚠ no imageUrl</div>
                           )}
                           <div className="text-white/30 text-xs mt-1">
                             {new Date(r.createdAt).toLocaleString()}

@@ -188,9 +188,11 @@ export default function Billboard({
     }
   }, [tiles, selectedTiles, pixelSize])
 
-  // Preload creative images whenever tiles change
+  // Preload creative images whenever tiles change.
+  // No crossOrigin — R2 public URLs load fine without it, and the Loupe only
+  // uses drawImage (not getImageData/toDataURL), so CORS is not required.
   useEffect(() => {
-    const needed = new Map<string, string>() // imageUrl → imageUrl (dedup by url)
+    const needed = new Map<string, string>()
     for (const info of Object.values(tiles)) {
       if (info.status === 'ACTIVE' && info.imageUrl) {
         if (!imageCache.current.has(info.imageUrl)) {
@@ -201,17 +203,40 @@ export default function Billboard({
     for (const [, url] of needed) {
       imageCache.current.set(url, 'loading')
       const img = new Image()
-      img.crossOrigin = 'anonymous'
       img.onload = () => {
         imageCache.current.set(url, img)
         setImageVersion((v) => v + 1)
       }
       img.onerror = () => {
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn('[billboard] image failed to load:', url)
+        }
         imageCache.current.set(url, 'error')
+        setImageVersion((v) => v + 1)
       }
       img.src = url
     }
   }, [tiles])
+
+  // Dev debug: log image loading state whenever tiles or cache changes
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return
+    const activeTiles = Object.values(tiles).filter((i) => i.status === 'ACTIVE')
+    const activeTilesWithImageUrl = activeTiles.filter((i) => i.imageUrl)
+    let loadedImagesCount = 0
+    let failedImagesCount = 0
+    for (const info of activeTilesWithImageUrl) {
+      const cached = imageCache.current.get(info.imageUrl!)
+      if (cached instanceof HTMLImageElement) loadedImagesCount++
+      else if (cached === 'error') failedImagesCount++
+    }
+    console.log('[billboard]', {
+      activeTilesCount: activeTiles.length,
+      activeTilesWithImageUrlCount: activeTilesWithImageUrl.length,
+      loadedImagesCount,
+      failedImagesCount,
+    })
+  }, [tiles, imageVersion])
 
   useEffect(() => {
     render()

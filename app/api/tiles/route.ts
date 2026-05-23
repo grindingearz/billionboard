@@ -9,7 +9,7 @@ export async function GET() {
       tileId: true,
       status: true,
       creativeId: true,
-      creative: { select: { imageUrl: true, destUrl: true, altText: true } },
+      creative: { select: { imageUrl: true, destUrl: true, altText: true, displayMode: true } },
       user: { select: { email: true } },
     },
   })
@@ -23,6 +23,7 @@ export async function GET() {
       destUrl: r.creative?.destUrl ?? undefined,
       altText: r.creative?.altText ?? undefined,
       advertiserEmail: r.user?.email ?? undefined,
+      displayMode: (r.creative?.displayMode ?? 'REPEAT') as 'REPEAT' | 'STRETCH',
     }
   }
 
