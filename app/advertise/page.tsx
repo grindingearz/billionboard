@@ -334,7 +334,27 @@ export default function AdvertisePage() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       const isCancel = /reject|cancel|user denied/i.test(msg)
-      setTopupError(isCancel ? 'Transaction cancelled' : (msg || 'Transaction failed'))
+      const isRpcForbidden = /403|access.?forbidden/i.test(msg)
+
+      if (isRpcForbidden) {
+        setTopupError(
+          'Payment failed because the Solana RPC endpoint rejected the request. Please try again or contact support.'
+        )
+        if (process.env.NODE_ENV !== 'production') {
+          try {
+            const rawUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
+            const host = new URL(rawUrl).hostname
+            console.error('[pay-usdc] RPC 403', {
+              host,
+              network: process.env.NEXT_PUBLIC_SOLANA_NETWORK ?? 'mainnet-beta',
+              error: msg,
+            })
+          } catch { /* URL parse failed */ }
+        }
+      } else {
+        setTopupError(isCancel ? 'Transaction cancelled' : (msg || 'Transaction failed'))
+      }
+
       setPayStatus('idle')
       setPendingDeposit(null)
     } finally {

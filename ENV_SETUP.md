@@ -63,6 +63,7 @@ Add each variable below. Set the environment to **Production**, **Preview**, and
 | `NEXT_PUBLIC_TOTAL_TILES` | `100000` |
 | `NEXT_PUBLIC_TOTAL_PIXELS` | `1000000000` |
 | `NEXT_PUBLIC_SOLANA_NETWORK` | `mainnet-beta` |
+| `NEXT_PUBLIC_SOLANA_RPC_URL` | Your Helius mainnet RPC URL — e.g. `https://mainnet.helius-rpc.com/?api-key=YOUR_KEY`. Used by the wallet adapter (Pay USDC button). Without this the app falls back to the public Solana RPC which returns 403 on wallet transactions. |
 | `NEXT_PUBLIC_BOARD_MINT` | Leave empty until token launches |
 | `NEXT_PUBLIC_USDC_MINT` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` (mainnet USDC) |
 | `NEXT_PUBLIC_PRIVY_APP_ID` | From your Privy dashboard |
@@ -76,8 +77,8 @@ Add each variable below. Set the environment to **Production**, **Preview**, and
 |----------|-------|
 | `DATABASE_URL` | Copy from Railway Postgres after provisioning |
 | `PRIVY_APP_SECRET` | From your Privy dashboard — keep this secret |
-| `HELIUS_API_KEY` | From helius.dev — used for Solana RPC and indexing |
-| `HELIUS_RPC_URL` | e.g. `https://mainnet.helius-rpc.com/?api-key=YOUR_KEY` |
+| `HELIUS_API_KEY` | From helius.dev — used for token holder indexing and USDC reconciliation |
+| `HELIUS_RPC_URL` | Server-side Helius RPC — e.g. `https://mainnet.helius-rpc.com/?api-key=YOUR_KEY`. Used only by API routes, cron jobs, and holder snapshots. Do **not** use this for browser/wallet transactions — use `NEXT_PUBLIC_SOLANA_RPC_URL` instead. |
 | `ADMIN_WALLET` | Solana public key for admin operations |
 | `FEE_CREATOR_WALLET` | Pump.fun creator fee wallet to track |
 | `AD_REVENUE_WALLET` | Wallet that receives ad revenue |
