@@ -335,17 +335,36 @@ export async function GET(req: Request) {
 
   if (view === 'settlements') {
     const statusFilter = searchParams.get('status')
-    const settlements = await prisma.revenueSettlement.findMany({
-      where: statusFilter ? { settlementStatus: statusFilter as never } : undefined,
-      include: {
-        revenueEvent: {
-          select: { type: true, amount: true, createdAt: true, userId: true },
+    const [settlements, totalsAgg, settledTreasuryAgg, settledDistAgg, pendingAgg, failedAgg] = await Promise.all([
+      prisma.revenueSettlement.findMany({
+        where: statusFilter ? { settlementStatus: statusFilter as never } : undefined,
+        include: {
+          revenueEvent: {
+            select: { type: true, amount: true, createdAt: true, userId: true },
+          },
         },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.revenueSettlement.aggregate({ _sum: { amount: true, treasuryAmount: true, distributionAmount: true }, _count: { _all: true } }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { treasuryAmount: true } }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { distributionAmount: true } }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: { notIn: ['SETTLED', 'FAILED', 'PARTIAL'] } }, _sum: { amount: true } }),
+      prisma.revenueSettlement.aggregate({ where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } }, _sum: { amount: true } }),
+    ])
+    return NextResponse.json({
+      settlements,
+      totals: {
+        totalEvents: totalsAgg._count._all,
+        totalAmount: Number(totalsAgg._sum.amount ?? 0),
+        treasuryDue: Number(totalsAgg._sum.treasuryAmount ?? 0),
+        distributionDue: Number(totalsAgg._sum.distributionAmount ?? 0),
+        treasurySettled: Number(settledTreasuryAgg._sum.treasuryAmount ?? 0),
+        distributionSettled: Number(settledDistAgg._sum.distributionAmount ?? 0),
+        pendingAmount: Number(pendingAgg._sum.amount ?? 0),
+        failedAmount: Number(failedAgg._sum.amount ?? 0),
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
     })
-    return NextResponse.json({ settlements })
   }
 
   if (view === 'accounting') {
@@ -365,6 +384,11 @@ export async function GET(req: Request) {
       activeDailyRateAgg,
       activeTileCount,
       earnedNotYetMoved,
+      allTreasuryGenerated,
+      allDistributionGenerated,
+      pendingAmountAgg,
+      failedAmountAgg,
+      feePercentStr,
     ] = await Promise.all([
       prisma.advertiserWallet.aggregate({ _sum: { usdcBalance: true } }),
       prisma.revenueEvent.aggregate({
@@ -383,7 +407,7 @@ export async function GET(req: Request) {
         where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } },
       }),
       prisma.revenueSettlement.count({
-        where: { settlementStatus: 'UNSETTLED' },
+        where: { settlementStatus: { notIn: ['SETTLED', 'FAILED', 'PARTIAL'] } },
       }),
       prisma.revenueSettlement.aggregate({
         where: { settlementStatus: 'SETTLED' },
@@ -413,6 +437,20 @@ export async function GET(req: Request) {
         },
         _sum: { amount: true },
       }),
+      // Total treasury and distribution generated across ALL settlements (not just settled)
+      prisma.revenueSettlement.aggregate({ _sum: { treasuryAmount: true } }),
+      prisma.revenueSettlement.aggregate({ _sum: { distributionAmount: true } }),
+      // Pending (not yet sent) settlement amount
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: { notIn: ['SETTLED', 'FAILED', 'PARTIAL'] } },
+        _sum: { amount: true },
+      }),
+      // Failed settlement amount
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } },
+        _sum: { amount: true },
+      }),
+      getSetting('management_fee_percent'),
     ])
 
     const walletConfig = {
@@ -455,6 +493,12 @@ export async function GET(req: Request) {
       pendingSettlements: pendingCount,
       treasurySent: Number(treasurySent._sum.treasuryAmount ?? 0),
       distributionSent: Number(distributionSent._sum.distributionAmount ?? 0),
+      // Full picture of generated vs sent
+      totalTreasuryGenerated: Number(allTreasuryGenerated._sum.treasuryAmount ?? 0),
+      totalDistributionGenerated: Number(allDistributionGenerated._sum.distributionAmount ?? 0),
+      pendingAmount: Number(pendingAmountAgg._sum.amount ?? 0),
+      failedAmount: Number(failedAmountAgg._sum.amount ?? 0),
+      feePercent: Math.max(0, Math.min(100, parseFloat(feePercentStr) || 10)),
       walletConfig,
       today: today.toISOString(),
       // Reconciliation data

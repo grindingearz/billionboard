@@ -57,8 +57,12 @@ export async function fetchWalletUsdcBalances(): Promise<WalletBalances> {
         return { key, result: { address, balance } as WalletBalance }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        // No token account = 0 USDC balance (wallet exists but hasn't received USDC yet)
+        const errName = err instanceof Error ? err.name : ''
+        // No token account = 0 USDC balance (wallet exists but hasn't received USDC yet).
+        // Check both err.name (spl-token typed errors have empty message) and err.message.
         if (
+          errName === 'TokenAccountNotFoundError' ||
+          errName === 'TokenInvalidAccountOwnerError' ||
           msg.includes('could not find account') ||
           msg.includes('Account does not exist') ||
           msg.includes('TokenAccountNotFound') ||

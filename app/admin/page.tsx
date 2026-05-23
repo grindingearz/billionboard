@@ -141,6 +141,11 @@ interface AccountingData {
   pendingSettlements: number
   treasurySent: number
   distributionSent: number
+  totalTreasuryGenerated: number
+  totalDistributionGenerated: number
+  pendingAmount: number
+  failedAmount: number
+  feePercent: number
   walletConfig: {
     topupWallet: string | null
     revenueWallet: string | null
@@ -194,6 +199,17 @@ interface WalletBalance {
   address: string | null
   balance: number | null
   error?: string
+}
+
+interface SettlementTotals {
+  totalEvents: number
+  totalAmount: number
+  treasuryDue: number
+  distributionDue: number
+  treasurySettled: number
+  distributionSettled: number
+  pendingAmount: number
+  failedAmount: number
 }
 
 interface SummaryData {
@@ -364,6 +380,7 @@ export default function AdminPage() {
   const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
   const [accountingData, setAccountingData] = useState<AccountingData | null>(null)
   const [settlements, setSettlements] = useState<SettlementRow[]>([])
+  const [settlementTotals, setSettlementTotals] = useState<SettlementTotals | null>(null)
   const [retryingSettlement, setRetryingSettlement] = useState<Record<string, boolean>>({})
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
@@ -491,6 +508,7 @@ export default function AdminPage() {
       if (res.ok) {
         const d = await res.json()
         setSettlements(d.settlements ?? [])
+        if (d.totals) setSettlementTotals(d.totals)
       }
     }
     setLoading(false)
@@ -724,7 +742,7 @@ export default function AdminPage() {
   }
 
   const exportEpochsCsv = () => {
-    const headers = ['Date', 'Ad Fees (USDC)', 'Trading Fees (USDC)', 'Gross Fees (USDC)', 'Mgmt Fee %', 'Mgmt Fee Amount (USDC)', 'Balance to Distribute (USDC)', 'Eligible Supply', 'Status']
+    const headers = ['Date', 'Ad Fees (USDC)', 'Trading Fees (USDC)', 'Gross Fees (USDC)', 'Treasury Fee %', 'Treasury Fee Amount (USDC)', 'Distribution Pool (USDC)', 'Eligible Supply', 'Status']
     const rows = distEpochs.map((ep) => {
       const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
       const ed = new Date(ep.epochDate)
@@ -1787,7 +1805,7 @@ export default function AdminPage() {
 
                   <div>
                     <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
-                      Management fee (%)
+                      Treasury fee (%)
                     </label>
                     <input
                       type="number"
@@ -1926,7 +1944,7 @@ export default function AdminPage() {
                             { label: 'Advertising fees', v: lr.adRevenue, color: 'text-green-400' },
                             { label: 'Trading fees', v: lr.tradingFeeRevenue, color: 'text-blue-400' },
                             { label: 'Gross fees', v: lr.grossPool, color: 'text-white' },
-                            { label: `Mgmt fee (${lr.feePercent}%)`, v: lr.estimatedMgmtFee, color: 'text-white/50' },
+                            { label: `Treasury fee (${lr.feePercent}%)`, v: lr.estimatedMgmtFee, color: 'text-white/50' },
                             { label: 'Balance to distribute', v: lr.estimatedClaimPool, color: 'text-green-400' },
                           ].map(({ label, v, color }) => (
                             <div key={label} className="bg-white/3 rounded p-2">
@@ -1981,8 +1999,8 @@ export default function AdminPage() {
                               <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Ad Fees</th>
                               <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Trading Fees</th>
                               <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Gross</th>
-                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Mgmt %</th>
-                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Mgmt $</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Treas %</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Treas $</th>
                               <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">To Distribute</th>
                               <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Supply</th>
                               <th className="pb-2 text-center font-medium px-2 whitespace-nowrap">Status</th>
@@ -2328,55 +2346,59 @@ export default function AdminPage() {
                   })()}
 
                   {/* Main accounting cards */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {[
+                      {
+                        label: 'Advertising Fees Earned',
+                        value: `$${accountingData.earnedAdFees.toFixed(2)}`,
+                        sub: accountingData.earnedTradingFees > 0 ? `+$${accountingData.earnedTradingFees.toFixed(2)} trading fees` : 'AD_RENT_REVENUE (billed)',
+                        color: 'text-green-400',
+                      },
+                      {
+                        label: `Treasury Fee Generated (${accountingData.feePercent}%)`,
+                        value: `$${accountingData.totalTreasuryGenerated.toFixed(2)}`,
+                        sub: `${accountingData.feePercent}% of earned — due to TREASURY_WALLET`,
+                        color: 'text-white/80',
+                      },
+                      {
+                        label: `Distribution Pool Generated (${100 - accountingData.feePercent}%)`,
+                        value: `$${accountingData.totalDistributionGenerated.toFixed(2)}`,
+                        sub: `${100 - accountingData.feePercent}% of earned — due to DISTRIBUTION_WALLET`,
+                        color: 'text-blue-400',
+                      },
+                      {
+                        label: 'Treasury Sent (on-chain)',
+                        value: `$${accountingData.treasurySent.toFixed(2)}`,
+                        sub: accountingData.totalTreasuryGenerated > 0
+                          ? `${((accountingData.treasurySent / accountingData.totalTreasuryGenerated) * 100).toFixed(0)}% of generated settled`
+                          : 'To TREASURY_WALLET',
+                        color: accountingData.treasurySent >= accountingData.totalTreasuryGenerated && accountingData.totalTreasuryGenerated > 0 ? 'text-green-400' : 'text-white/50',
+                      },
+                      {
+                        label: 'Distribution Sent (on-chain)',
+                        value: `$${accountingData.distributionSent.toFixed(2)}`,
+                        sub: accountingData.totalDistributionGenerated > 0
+                          ? `${((accountingData.distributionSent / accountingData.totalDistributionGenerated) * 100).toFixed(0)}% of generated settled`
+                          : 'To DISTRIBUTION_WALLET',
+                        color: accountingData.distributionSent >= accountingData.totalDistributionGenerated && accountingData.totalDistributionGenerated > 0 ? 'text-green-400' : 'text-white/50',
+                      },
+                      {
+                        label: 'Pending Settlement',
+                        value: `$${accountingData.pendingAmount.toFixed(2)}`,
+                        sub: `${accountingData.pendingSettlements} event${accountingData.pendingSettlements !== 1 ? 's' : ''} generated but not yet sent`,
+                        color: accountingData.pendingAmount > 0 ? 'text-amber-400' : 'text-white/30',
+                      },
+                      {
+                        label: 'Failed Settlement',
+                        value: `$${accountingData.failedAmount.toFixed(2)}`,
+                        sub: `${accountingData.failedSettlements} FAILED / PARTIAL — needs retry`,
+                        color: accountingData.failedAmount > 0 ? 'text-red-400' : 'text-white/30',
+                      },
                       {
                         label: 'Unused Advertiser Balances',
                         value: `$${accountingData.unusedAdvertiserBalances.toFixed(2)}`,
                         sub: 'Prepaid deposits not yet billed',
                         color: 'text-amber-400',
-                      },
-                      {
-                        label: 'Earned Advertising Fees',
-                        value: `$${accountingData.earnedAdFees.toFixed(2)}`,
-                        sub: 'AD_RENT_REVENUE events (billed)',
-                        color: 'text-green-400',
-                      },
-                      {
-                        label: 'Trading Fees Earned',
-                        value: `$${accountingData.earnedTradingFees.toFixed(2)}`,
-                        sub: 'TRADING_FEE_REVENUE events',
-                        color: 'text-blue-400',
-                      },
-                      {
-                        label: 'Total Settled (on-chain)',
-                        value: `$${accountingData.totalSettled.toFixed(2)}`,
-                        sub: 'SETTLED settlements',
-                        color: 'text-green-400',
-                      },
-                      {
-                        label: 'Treasury Fees Sent',
-                        value: `$${accountingData.treasurySent.toFixed(2)}`,
-                        sub: 'To TREASURY_WALLET',
-                        color: 'text-white/70',
-                      },
-                      {
-                        label: 'Distribution Sent',
-                        value: `$${accountingData.distributionSent.toFixed(2)}`,
-                        sub: 'To DISTRIBUTION_WALLET',
-                        color: 'text-white/70',
-                      },
-                      {
-                        label: 'Pending Settlements',
-                        value: String(accountingData.pendingSettlements),
-                        sub: 'UNSETTLED events',
-                        color: accountingData.pendingSettlements > 0 ? 'text-amber-400' : 'text-white/30',
-                      },
-                      {
-                        label: 'Failed Settlements',
-                        value: String(accountingData.failedSettlements),
-                        sub: 'FAILED / PARTIAL',
-                        color: accountingData.failedSettlements > 0 ? 'text-red-400' : 'text-white/30',
                       },
                     ].map(({ label, value, sub, color }) => (
                       <div key={label} className="border border-white/10 rounded-xl p-3 bg-white/2 space-y-0.5">
@@ -2549,6 +2571,30 @@ export default function AdminPage() {
                 </button>
               </div>
 
+              {/* Settlement totals summary */}
+              {settlementTotals && (
+                <div className="border border-white/10 rounded-xl p-4 bg-white/2">
+                  <div className="text-[10px] text-white/30 uppercase tracking-widest mb-3">All-Time Settlement Totals</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    {[
+                      { label: 'Revenue Events', value: String(settlementTotals.totalEvents), color: 'text-white/70' },
+                      { label: 'Total Amount', value: `$${settlementTotals.totalAmount.toFixed(2)}`, color: 'text-white' },
+                      { label: 'Treasury Due', value: `$${settlementTotals.treasuryDue.toFixed(2)}`, color: 'text-white/60' },
+                      { label: 'Distribution Due', value: `$${settlementTotals.distributionDue.toFixed(2)}`, color: 'text-blue-400/70' },
+                      { label: 'Treasury Settled', value: `$${settlementTotals.treasurySettled.toFixed(2)}`, color: settlementTotals.treasurySettled >= settlementTotals.treasuryDue ? 'text-green-400' : 'text-white/50' },
+                      { label: 'Distribution Settled', value: `$${settlementTotals.distributionSettled.toFixed(2)}`, color: settlementTotals.distributionSettled >= settlementTotals.distributionDue ? 'text-green-400' : 'text-blue-400/50' },
+                      { label: 'Pending Amount', value: `$${settlementTotals.pendingAmount.toFixed(2)}`, color: settlementTotals.pendingAmount > 0 ? 'text-amber-400' : 'text-white/30' },
+                      { label: 'Failed Amount', value: `$${settlementTotals.failedAmount.toFixed(2)}`, color: settlementTotals.failedAmount > 0 ? 'text-red-400' : 'text-white/30' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className="bg-white/3 rounded-lg p-2">
+                        <div className={`font-mono font-bold text-sm ${color}`}>{value}</div>
+                        <div className="text-white/30 text-[10px] mt-0.5">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {settlements.length === 0 ? (
                 <p className="text-white/30 text-sm text-center py-12">No settlement records yet. They are created when ads are billed or activated.</p>
               ) : (
@@ -2559,10 +2605,10 @@ export default function AdminPage() {
                         <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Date</th>
                         <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Type</th>
                         <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Amount</th>
-                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Treasury</th>
-                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Distribution</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Treas.</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Dist.</th>
                         <th className="pb-2 text-center font-medium pr-3 whitespace-nowrap">Status</th>
-                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Txs</th>
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Leg Status</th>
                         <th className="pb-2 text-left font-medium whitespace-nowrap">Error / Action</th>
                       </tr>
                     </thead>
@@ -2575,6 +2621,46 @@ export default function AdminPage() {
                           : s.settlementStatus === 'UNSETTLED' ? 'text-white/40 bg-white/5'
                           : 'text-blue-400 bg-blue-400/10'
                         const canRetry = ['FAILED', 'PARTIAL', 'UNSETTLED'].includes(s.settlementStatus)
+
+                        // Derive per-leg status from tx signatures + overall status
+                        const leg1Done = !!s.moveToRevenueTxSignature
+                        const leg2Done = !!s.treasuryTxSignature
+                        const leg3Done = !!s.distributionTxSignature
+                        const isTerminalFail = s.settlementStatus === 'FAILED' || s.settlementStatus === 'PARTIAL'
+
+                        const leg1Status: 'confirmed' | 'pending' | 'failed' =
+                          leg1Done ? 'confirmed'
+                          : isTerminalFail ? 'failed'
+                          : 'pending'
+                        const leg2Status: 'confirmed' | 'pending' | 'failed' | 'waiting' =
+                          leg2Done ? 'confirmed'
+                          : !leg1Done ? 'waiting'
+                          : isTerminalFail ? 'failed'
+                          : 'pending'
+                        const leg3Status: 'confirmed' | 'pending' | 'failed' | 'waiting' =
+                          leg3Done ? 'confirmed'
+                          : !leg1Done ? 'waiting'
+                          : isTerminalFail ? 'failed'
+                          : 'pending'
+
+                        const LegBadge = ({ status, label, sig }: { status: string; label: string; sig: string | null }) => {
+                          if (sig) return (
+                            <a href={`https://solscan.io/tx/${sig}`} target="_blank" rel="noopener noreferrer"
+                              className="text-[9px] px-1 py-0.5 rounded bg-green-500/20 text-green-400 font-mono whitespace-nowrap hover:bg-green-500/30">
+                              {label} ✓↗
+                            </a>
+                          )
+                          if (status === 'waiting') return (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-white/5 text-white/20 whitespace-nowrap">{label} –</span>
+                          )
+                          if (status === 'failed') return (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/20 text-red-400 whitespace-nowrap">{label} ✗</span>
+                          )
+                          return (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 whitespace-nowrap">{label} ⏳</span>
+                          )
+                        }
+
                         return (
                           <tr key={s.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
                             <td className="py-2 pr-3 text-white/50 whitespace-nowrap">
@@ -2603,18 +2689,9 @@ export default function AdminPage() {
                             </td>
                             <td className="py-2 pr-3">
                               <div className="flex flex-col gap-0.5">
-                                {s.moveToRevenueTxSignature && (
-                                  <a href={`https://solscan.io/tx/${s.moveToRevenueTxSignature}`} target="_blank" rel="noopener noreferrer"
-                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">rev ↗</a>
-                                )}
-                                {s.treasuryTxSignature && (
-                                  <a href={`https://solscan.io/tx/${s.treasuryTxSignature}`} target="_blank" rel="noopener noreferrer"
-                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">treas ↗</a>
-                                )}
-                                {s.distributionTxSignature && (
-                                  <a href={`https://solscan.io/tx/${s.distributionTxSignature}`} target="_blank" rel="noopener noreferrer"
-                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">dist ↗</a>
-                                )}
+                                <LegBadge status={leg1Status} label="Src→Rev" sig={s.moveToRevenueTxSignature} />
+                                <LegBadge status={leg2Status} label="Rev→Treas" sig={s.treasuryTxSignature} />
+                                <LegBadge status={leg3Status} label="Rev→Dist" sig={s.distributionTxSignature} />
                               </div>
                             </td>
                             <td className="py-2">
