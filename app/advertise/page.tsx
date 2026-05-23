@@ -69,6 +69,8 @@ export default function AdvertisePage() {
   const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
   const boardContainerRef = useRef<HTMLDivElement>(null)
   const sentAtRef = useRef<number>(0)
+  // Tracks the wallet address that owns the current session. Reset to null on disconnect.
+  const authedWalletRef = useRef<string | null>(null)
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const initialScrollDone = useRef(false)
 
@@ -165,28 +167,30 @@ export default function AdvertisePage() {
   }, [])
 
   const loadBalance = useCallback(async () => {
+    const forWallet = authedWalletRef.current  // snapshot: which wallet this fetch is for
     const res = await fetch('/api/topup')
-    if (res.ok) {
-      const data = await res.json()
-      setBalance(Number(data.balance))
-      setWalletAddress(data.walletAddress ?? '')
-      setWalletInput(data.walletAddress ?? '')
-      setAuthState('logged_in')
-      // Resume in-flight payment from a prior session (only if signature was already stored)
-      const pending = (data.topups as Array<{ status: string; id: string; depositWallet: string; advertiserWallet: string; expiresAt: string; txSignature?: string; amount?: number; method?: string }>)
-        ?.find((t) => t.status === 'PENDING' && t.method === 'usdc_solana')
-      if (pending?.txSignature) {
-        setPendingDeposit({
-          topupId: pending.id,
-          depositWallet: pending.depositWallet,
-          advertiserWallet: pending.advertiserWallet,
-          expiresAt: pending.expiresAt,
-          txSignature: pending.txSignature,
-          amount: pending.amount ? Number(pending.amount) : undefined,
-        })
-        setPayStatus('confirming')
-        setShowTopup(true)
-      }
+    if (!res.ok) return
+    // Discard if wallet changed while this request was in-flight
+    if (authedWalletRef.current !== forWallet) return
+    const data = await res.json()
+    setBalance(Number(data.balance))
+    setWalletAddress(data.walletAddress ?? '')
+    setWalletInput(data.walletAddress ?? '')
+    setAuthState('logged_in')
+    // Resume in-flight payment from a prior session (only if signature was already stored)
+    const pending = (data.topups as Array<{ status: string; id: string; depositWallet: string; advertiserWallet: string; expiresAt: string; txSignature?: string; amount?: number; method?: string }>)
+      ?.find((t) => t.status === 'PENDING' && t.method === 'usdc_solana')
+    if (pending?.txSignature) {
+      setPendingDeposit({
+        topupId: pending.id,
+        depositWallet: pending.depositWallet,
+        advertiserWallet: pending.advertiserWallet,
+        expiresAt: pending.expiresAt,
+        txSignature: pending.txSignature,
+        amount: pending.amount ? Number(pending.amount) : undefined,
+      })
+      setPayStatus('confirming')
+      setShowTopup(true)
     }
   }, [])
 
@@ -208,9 +212,8 @@ export default function AdvertisePage() {
 
   useEffect(() => {
     loadTiles()
-    loadBalance()
     loadSettings()
-  }, [loadTiles, loadBalance, loadSettings])
+  }, [loadTiles, loadSettings])
 
   // Dev: verify selection and balance precision logic on mount; check browser console for results
   useEffect(() => {
@@ -221,36 +224,58 @@ export default function AdvertisePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Auto-authenticate when wallet connects and no session exists yet
+  // Unified wallet lifecycle: connect / disconnect / switch.
+  // Every wallet address change clears state immediately and re-authenticates.
+  // This ensures no wallet ever sees another wallet's balance or session.
   useEffect(() => {
-    if (!publicKey || authState === 'logged_in') return
-    const addr = publicKey.toBase58()
+    const addr = publicKey?.toBase58() ?? null
+    if (addr === authedWalletRef.current) return  // same wallet, no action needed
+
+    authedWalletRef.current = addr
+
+    // Immediately wipe all wallet-scoped financial state
+    setBalance(null)
+    setWalletAddress('')
+    setWalletInput('')
+    setPendingDeposit(null)
+    setPayStatus('idle')
+    setTopupError('')
+    setShowTopup(false)
+    setTopupSuccess(false)
+    sentAtRef.current = 0
+
+    if (!addr) {
+      // Wallet disconnected — clear session cookie so no stale data leaks
+      setAuthState('idle')
+      fetch('/api/auth', { method: 'DELETE' }).catch(() => {})
+      return
+    }
+
+    // New wallet connected — authenticate as this wallet and load its data
     setAuthState('logging_in')
+    const controller = new AbortController()
+
     fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ walletAddress: addr }),
+      signal: controller.signal,
     })
       .then((r) => r.json())
-      .then((d) => { if (d.ok) loadBalance(); else setAuthState('idle') })
-      .catch(() => setAuthState('idle'))
+      .then((d) => {
+        // If wallet changed again while this was in-flight, discard completely
+        if (authedWalletRef.current !== addr) return
+        if (d.ok) loadBalance()
+        else { authedWalletRef.current = null; setAuthState('idle') }
+      })
+      .catch((e) => {
+        if (e?.name === 'AbortError') return
+        if (authedWalletRef.current === addr) { authedWalletRef.current = null; setAuthState('idle') }
+      })
+
+    return () => controller.abort()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey])
-
-  // Auto-save connected wallet address to advertiser account
-  useEffect(() => {
-    if (!publicKey || authState !== 'logged_in') return
-    const addr = publicKey.toBase58()
-    if (addr === walletAddress) return
-    fetch('/api/user/wallet', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ walletAddress: addr }),
-    })
-      .then((r) => r.json())
-      .then((d) => { if (d.ok) setWalletAddress(addr) })
-      .catch(() => {})
-  }, [publicKey, authState, walletAddress])
 
   const handleSaveWallet = async (e: React.FormEvent) => {
     e.preventDefault()

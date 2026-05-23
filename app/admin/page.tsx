@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution'
+type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution' | 'users'
 
 interface ResetState {
   userId: string | null
@@ -235,6 +235,17 @@ export default function AdminPage() {
   const [txSigResults, setTxSigResults] = useState<Record<string, TxSigCheckResult>>({})
   const [txSigRunning, setTxSigRunning] = useState<Record<string, boolean>>({})
 
+  interface UserBalanceRow {
+    id: string
+    walletAddress: string | null
+    email: string | null
+    balance: number
+    rentalCount: number
+    topupCount: number
+    createdAt: string
+  }
+  const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
+
   // Hydration guard
   useEffect(() => { setMounted(true) }, [])
 
@@ -335,6 +346,12 @@ export default function AdminPage() {
           confirmed: d.confirmed ?? [],
           unmatched: d.unmatched ?? [],
         })
+      }
+    } else if (view === 'users') {
+      const res = await fetch('/api/admin?view=user_balances')
+      if (res.ok) {
+        const d = await res.json()
+        setUserBalances(d.users ?? [])
       }
     }
     setLoading(false)
@@ -749,7 +766,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['pending', 'active', 'billing', 'epochs', 'distribution', 'pricing', 'topups', 'reset'] as AdminView[]).map((v) => (
+        {(['pending', 'active', 'billing', 'epochs', 'distribution', 'pricing', 'topups', 'users', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -766,6 +783,7 @@ export default function AdminPage() {
               : v === 'distribution' ? 'Distribution'
               : v === 'pricing' ? 'Pricing Settings'
               : v === 'topups' ? 'Top-ups'
+              : v === 'users' ? 'Users'
               : 'Testing / Reset'}
           </button>
         ))}
@@ -1813,6 +1831,54 @@ export default function AdminPage() {
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {view === 'users' && (
+            <div className="space-y-4">
+              <div className="text-xs text-white/40 mb-2">
+                Advertiser accounts — use this to verify wallet→balance associations after any wallet switching issues.
+              </div>
+              {userBalances.length === 0 ? (
+                <p className="text-white/30 text-sm text-center py-8">No advertiser accounts found.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
+                        <th className="pb-2 text-left font-medium pr-4 whitespace-nowrap">Wallet Address</th>
+                        <th className="pb-2 text-left font-medium pr-4 whitespace-nowrap">Email</th>
+                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Balance (USDC)</th>
+                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Rentals</th>
+                        <th className="pb-2 text-right font-medium pr-4 whitespace-nowrap">Topups</th>
+                        <th className="pb-2 text-right font-medium whitespace-nowrap">Joined</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {userBalances.map((u) => (
+                        <tr key={u.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
+                          <td className="py-2 pr-4">
+                            {u.walletAddress ? (
+                              <span className="font-mono text-green-400/80">
+                                {u.walletAddress.slice(0, 6)}…{u.walletAddress.slice(-4)}
+                              </span>
+                            ) : (
+                              <span className="text-white/20 italic">none</span>
+                            )}
+                          </td>
+                          <td className="py-2 pr-4 text-white/50 truncate max-w-[160px]">{u.email ?? '—'}</td>
+                          <td className={`py-2 pr-4 text-right font-mono font-bold ${u.balance > 0 ? 'text-green-400' : 'text-white/30'}`}>
+                            ${u.balance.toFixed(2)}
+                          </td>
+                          <td className="py-2 pr-4 text-right font-mono text-white/50">{u.rentalCount}</td>
+                          <td className="py-2 pr-4 text-right font-mono text-white/50">{u.topupCount}</td>
+                          <td className="py-2 text-right text-white/30">{new Date(u.createdAt).toLocaleDateString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

@@ -24,6 +24,17 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'Invalid Solana wallet address' }, { status: 400 })
   }
 
+  // Prevent overwriting a wallet address that belongs to a different user's session.
+  // This is a safety net: the frontend should never call PATCH for a different wallet,
+  // but if session state is stale this stops cross-wallet account corruption.
+  const existing = await prisma.user.findUnique({
+    where: { id: session.userId },
+    select: { walletAddress: true },
+  })
+  if (existing?.walletAddress && existing.walletAddress !== walletAddress) {
+    return NextResponse.json({ error: 'Account already has a different wallet linked' }, { status: 409 })
+  }
+
   try {
     await prisma.user.update({
       where: { id: session.userId },

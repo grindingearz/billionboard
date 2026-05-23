@@ -264,6 +264,33 @@ export async function GET(req: Request) {
     })
   }
 
+  if (view === 'user_balances') {
+    const users = await prisma.user.findMany({
+      where: { role: 'ADVERTISER' },
+      select: {
+        id: true,
+        walletAddress: true,
+        email: true,
+        createdAt: true,
+        advertiserWallet: { select: { usdcBalance: true } },
+        _count: { select: { adRentals: true, topups: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    })
+    return NextResponse.json({
+      users: users.map((u) => ({
+        id: u.id,
+        walletAddress: u.walletAddress,
+        email: u.email,
+        balance: u.advertiserWallet ? Number(u.advertiserWallet.usdcBalance) : 0,
+        rentalCount: u._count.adRentals,
+        topupCount: u._count.topups,
+        createdAt: u.createdAt,
+      })),
+    })
+  }
+
   return NextResponse.json({ error: 'Unknown view' }, { status: 400 })
 }
 

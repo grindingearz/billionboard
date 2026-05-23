@@ -70,6 +70,12 @@ export default function WalletButton() {
     return () => document.removeEventListener('mousedown', onClick)
   }, [])
 
+  // Clear stale dashboard data and close dropdown on wallet disconnect or switch
+  useEffect(() => {
+    setData(null)
+    setOpen(false)
+  }, [publicKey])
+
   useEffect(() => {
     if (open && publicKey) fetchDashboard()
   }, [open, publicKey, fetchDashboard])
