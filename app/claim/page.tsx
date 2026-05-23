@@ -24,6 +24,7 @@ interface ClaimData {
   excluded: boolean
   claimable: Snapshot[]
   claims: Claim[]
+  payoutActive: boolean
   tokenBalance: null
 }
 
@@ -39,7 +40,6 @@ export default function ClaimPage() {
 
   const walletAddr = publicKey?.toBase58() ?? ''
 
-  // Auto-lookup when wallet connects
   useEffect(() => {
     if (!walletAddr) { setData(null); return }
     setLoading(true)
@@ -53,6 +53,7 @@ export default function ClaimPage() {
 
   const claim = async (epochId: string) => {
     setClaiming(epochId)
+    setError('')
     const res = await fetch('/api/claims', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -69,6 +70,7 @@ export default function ClaimPage() {
   }
 
   const totalClaimable = data?.claimable.reduce((s, c) => s + Number(c.claimAmount), 0) ?? 0
+  const payoutActive = data?.payoutActive ?? false
 
   return (
     <div className="min-h-screen max-w-2xl mx-auto px-4 py-12">
@@ -76,6 +78,28 @@ export default function ClaimPage() {
       <p className="text-white/40 text-sm mb-8">
         $BOARD holders earn a pro-rata share of daily billboard revenue.
       </p>
+
+      {/* Pre-token banner */}
+      {!BOARD_MINT && (
+        <div className="border border-amber-400/20 bg-amber-400/5 rounded-xl p-4 mb-8">
+          <div className="text-xs text-amber-400/70 uppercase tracking-widest mb-1">Token launch pending</div>
+          <div className="text-white font-bold">$BOARD claims activate after token launch.</div>
+          <div className="text-white/40 text-sm mt-1">
+            Once $BOARD is live on Solana, your token balance will determine your share of daily revenue.
+          </div>
+        </div>
+      )}
+
+      {/* Payout pending banner (token exists but private key not configured) */}
+      {BOARD_MINT && !payoutActive && data && (
+        <div className="border border-white/10 bg-white/3 rounded-xl p-4 mb-8">
+          <div className="text-xs text-white/40 uppercase tracking-widest mb-1">Payouts pending</div>
+          <div className="text-white font-bold">Claims are prepared. Payout activation pending.</div>
+          <div className="text-white/40 text-sm mt-1">
+            You can register your claim now — USDC will be sent once the distribution wallet is activated.
+          </div>
+        </div>
+      )}
 
       {/* Wallet connect / status */}
       {!publicKey ? (
@@ -95,17 +119,6 @@ export default function ClaimPage() {
             {walletAddr.slice(0, 6)}…{walletAddr.slice(-4)}
           </span>
           {loading && <span className="text-white/30 text-xs animate-pulse">checking…</span>}
-        </div>
-      )}
-
-      {/* $BOARD not yet launched */}
-      {!BOARD_MINT && (
-        <div className="border border-amber-400/20 bg-amber-400/5 rounded-xl p-4 mb-8">
-          <div className="text-xs text-amber-400/70 uppercase tracking-widest mb-1">Token launch pending</div>
-          <div className="text-white font-bold">$BOARD claims activate after token launch.</div>
-          <div className="text-white/40 text-sm mt-1">
-            Once $BOARD is live on Solana, your token balance will determine your share of daily revenue.
-          </div>
         </div>
       )}
 
@@ -161,13 +174,24 @@ export default function ClaimPage() {
                       <span className="text-green-400 font-mono font-bold">
                         ${Number(s.claimAmount).toFixed(4)}
                       </span>
-                      <button
-                        onClick={() => claim(s.epochId)}
-                        disabled={claiming === s.epochId}
-                        className="bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black font-bold px-3 py-1.5 rounded text-xs transition-colors"
-                      >
-                        {claiming === s.epochId ? '…' : 'Claim'}
-                      </button>
+                      {payoutActive ? (
+                        <button
+                          onClick={() => claim(s.epochId)}
+                          disabled={claiming === s.epochId}
+                          className="bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black font-bold px-3 py-1.5 rounded text-xs transition-colors"
+                        >
+                          {claiming === s.epochId ? '…' : 'Claim'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => claim(s.epochId)}
+                          disabled={claiming === s.epochId}
+                          className="bg-white/10 hover:bg-white/15 disabled:opacity-50 text-white/60 font-bold px-3 py-1.5 rounded text-xs transition-colors"
+                          title="Payout not active yet — registers your claim for when it activates"
+                        >
+                          {claiming === s.epochId ? '…' : 'Register'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -194,7 +218,9 @@ export default function ClaimPage() {
                         className={`text-xs px-2 py-0.5 rounded-full ${
                           c.status === 'CLAIMED'
                             ? 'bg-green-400/10 text-green-400'
-                            : 'bg-red-400/10 text-red-400'
+                            : c.status === 'PENDING'
+                              ? 'bg-amber-400/10 text-amber-400'
+                              : 'bg-red-400/10 text-red-400'
                         }`}
                       >
                         {c.status}
@@ -230,9 +256,9 @@ export default function ClaimPage() {
         <ul className="text-sm text-white/50 space-y-1">
           <li>• Each day&apos;s billboard revenue is added to the claim pool</li>
           <li>• A snapshot of all $BOARD holders is taken daily</li>
-          <li>• Your share = your tokens ÷ total supply × daily pool</li>
+          <li>• Your share = your tokens ÷ total eligible supply × daily pool</li>
           <li>• Claims are distributed in USDC on Solana</li>
-          {/* TODO: add $BOARD pay-out implementation once token launches */}
+          <li>• System wallets are excluded from distributions</li>
         </ul>
       </div>
     </div>

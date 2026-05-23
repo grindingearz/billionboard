@@ -42,15 +42,26 @@ export async function POST(req: Request) {
   let tilesCharged = 0
   const expired: string[] = []
   const revenueEvents: Array<{
+    type: 'AD_RENT_REVENUE'
+    source: string
     billingRunId: string
     userId: string
     rentalId: string
+    amount: number
+  }> = []
+  const billingItems: Array<{
+    billingRunId: string
+    rentalId: string
+    billedDate: Date
     amount: number
   }> = []
 
   const billingRun = await prisma.dailyBillingRun.create({
     data: { runDate: today, status: 'pending' },
   })
+
+  // billedDate is the calendar date only (no time), used for BillingItem @@unique
+  const billedDate = new Date(today)
 
   for (const [userId, rentals] of byUser) {
     const wallet = rentals[0].user.advertiserWallet
@@ -73,9 +84,17 @@ export async function POST(req: Request) {
 
     for (const r of rentals) {
       revenueEvents.push({
+        type: 'AD_RENT_REVENUE',
+        source: 'billing',
         billingRunId: billingRun.id,
         userId,
         rentalId: r.id,
+        amount: Number(r.dailyRate),
+      })
+      billingItems.push({
+        billingRunId: billingRun.id,
+        rentalId: r.id,
+        billedDate,
         amount: Number(r.dailyRate),
       })
     }
@@ -106,8 +125,14 @@ export async function POST(req: Request) {
           }),
         ]
       : []),
-    // Create revenue events
-    prisma.revenueEvent.createMany({ data: revenueEvents }),
+    // Create BillingItems for per-rental idempotency (skipDuplicates guards against any race)
+    ...(billingItems.length > 0
+      ? [prisma.billingItem.createMany({ data: billingItems, skipDuplicates: true })]
+      : []),
+    // Create typed AD_RENT_REVENUE events
+    ...(revenueEvents.length > 0
+      ? [prisma.revenueEvent.createMany({ data: revenueEvents })]
+      : []),
     // Update billing run
     prisma.dailyBillingRun.update({
       where: { id: billingRun.id },

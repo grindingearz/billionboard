@@ -52,6 +52,7 @@ model AdRental {
   user          User           @relation(fields: [userId], references: [id])
   creative      AdCreative?    @relation(fields: [creativeId], references: [id])
   revenueEvents RevenueEvent[]
+  billingItems  BillingItem[]
 
   @@index([userId])
   @@index([tileId])
@@ -141,58 +142,133 @@ model DailyBillingRun {
   updatedAt    DateTime @updatedAt
 
   revenueEvents      RevenueEvent[]
+  billingItems       BillingItem[]
   distributionEpochs DistributionEpoch[]
 }
 
-model RevenueEvent {
+// Idempotency record: one row per rental per billing date.
+// @@unique([rentalId, billedDate]) prevents double-billing.
+model BillingItem {
   id           String   @id @default(cuid())
   billingRunId String
-  userId       String
   rentalId     String
-  amount       Decimal  @db.Decimal(18, 6)
+  billedDate   DateTime @db.Date
+  amount       Decimal  @db.Decimal(10, 2)
   createdAt    DateTime @default(now())
 
   billingRun DailyBillingRun @relation(fields: [billingRunId], references: [id])
   rental     AdRental        @relation(fields: [rentalId], references: [id])
 
+  @@unique([rentalId, billedDate])
   @@index([billingRunId])
 }
 
-model DistributionEpoch {
-  id           String      @id @default(cuid())
+// Revenue ledger — tracks every money movement through the platform.
+model RevenueEvent {
+  id           String           @id @default(cuid())
+  type         RevenueEventType @default(AD_RENT_REVENUE)
+  source       String           @default("billing") // 'billing' | 'webhook' | 'manual' | 'admin'
+  amount       Decimal          @db.Decimal(18, 6)
+  currency     String           @default("USDC")
+  wallet       String?
+  txSignature  String?
   billingRunId String?
-  epochDate    DateTime    @unique
-  totalPool    Decimal     @default(0) @db.Decimal(18, 6)
-  snapshotDate DateTime?
-  status       EpochStatus @default(PENDING)
-  txHash       String? // TODO: real Solana distribution tx hash
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  userId       String?
+  rentalId     String?
+  epochId      String?
+  metadata     Json?
+  createdAt    DateTime         @default(now())
+
+  billingRun DailyBillingRun?   @relation(fields: [billingRunId], references: [id])
+  rental     AdRental?          @relation(fields: [rentalId], references: [id])
+  epoch      DistributionEpoch? @relation(fields: [epochId], references: [id])
+
+  @@index([type])
+  @@index([billingRunId])
+  @@index([epochId])
+  @@index([txSignature])
+  @@index([createdAt])
+}
+
+enum RevenueEventType {
+  TOPUP_DEPOSIT
+  AD_RENT_REVENUE
+  TRADING_FEE_REVENUE
+  MANAGEMENT_FEE
+  CLAIM_POOL_ALLOCATION
+  CLAIM_PAYOUT
+  MANUAL_ADJUSTMENT
+}
+
+model DistributionEpoch {
+  id                  String      @id @default(cuid())
+  billingRunId        String?
+  epochDate           DateTime    @unique
+  startTime           DateTime?
+  endTime             DateTime?
+  // Revenue breakdown
+  adRevenue           Decimal     @default(0) @db.Decimal(18, 6)
+  tradingFeeRevenue   Decimal     @default(0) @db.Decimal(18, 6)
+  grossPool           Decimal     @default(0) @db.Decimal(18, 6)
+  managementFeePercent Decimal    @default(10) @db.Decimal(5, 2)
+  managementFeeAmount Decimal     @default(0) @db.Decimal(18, 6)
+  claimPoolAmount     Decimal     @default(0) @db.Decimal(18, 6)
+  // Legacy field — kept for backward compat, mirrors claimPoolAmount
+  totalPool           Decimal     @default(0) @db.Decimal(18, 6)
+  // Snapshot
+  eligibleSupply      Decimal     @default(0) @db.Decimal(18, 9)
+  snapshotDate        DateTime?
+  // Status
+  status              EpochStatus @default(DRAFT)
+  publishedAt         DateTime?
+  closedAt            DateTime?
+  // Solana tx for on-chain distribution (future)
+  txHash              String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 
   billingRun      DailyBillingRun?  @relation(fields: [billingRunId], references: [id])
   holderSnapshots HolderSnapshot[]
   claims          Claim[]
+  revenueEvents   RevenueEvent[]
 }
 
 enum EpochStatus {
+  // Legacy values — kept for backward compat with any existing rows
   PENDING
   SNAPSHOT_TAKEN
+  // Active values
+  DRAFT
+  BILLED
+  SNAPSHOTTED
   PUBLISHED
   CLOSED
 }
 
 model HolderSnapshot {
-  id            String   @id @default(cuid())
+  id            String         @id @default(cuid())
   epochId       String
   walletAddress String
-  tokenBalance  Decimal  @db.Decimal(18, 9)
-  claimAmount   Decimal  @db.Decimal(18, 6)
-  createdAt     DateTime @default(now())
+  tokenBalance  Decimal        @db.Decimal(18, 9)
+  claimAmount   Decimal        @db.Decimal(18, 6)
+  claimedAmount Decimal        @default(0) @db.Decimal(18, 6)
+  status        SnapshotStatus @default(CLAIMABLE)
+  txSignature   String?
+  claimedAt     DateTime?
+  createdAt     DateTime       @default(now())
 
   epoch DistributionEpoch @relation(fields: [epochId], references: [id])
 
   @@unique([epochId, walletAddress])
   @@index([walletAddress])
+  @@index([status])
+}
+
+enum SnapshotStatus {
+  CLAIMABLE
+  CLAIMED
+  PENDING
+  VOID
 }
 
 model Claim {
@@ -221,6 +297,7 @@ enum ClaimStatus {
 model ExcludedWallet {
   id            String   @id @default(cuid())
   walletAddress String   @unique
+  label         String?
   reason        String?
   createdAt     DateTime @default(now())
 }

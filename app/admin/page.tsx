@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset'
+type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution'
 
 interface ResetState {
   userId: string | null
@@ -90,6 +90,48 @@ interface UnmatchedTx {
   source: string
 }
 
+interface DistributionEpoch {
+  id: string
+  epochDate: string
+  status: string
+  adRevenue: string
+  tradingFeeRevenue: string
+  grossPool: string
+  managementFeePercent: string
+  managementFeeAmount: string
+  claimPoolAmount: string
+  totalPool: string
+  eligibleSupply: string
+  snapshotDate: string | null
+  publishedAt: string | null
+  closedAt: string | null
+  billingRunId: string | null
+  _count?: { holderSnapshots: number; claims: number }
+}
+
+interface RevenueEvent {
+  id: string
+  type: string
+  source: string
+  amount: string
+  currency: string
+  wallet: string | null
+  txSignature: string | null
+  billingRunId: string | null
+  userId: string | null
+  rentalId: string | null
+  epochId: string | null
+  createdAt: string
+}
+
+interface ExcludedWallet {
+  id: string
+  walletAddress: string
+  label: string | null
+  reason: string | null
+  createdAt: string
+}
+
 const ADMIN_WALLET = process.env.NEXT_PUBLIC_ADMIN_WALLET ?? ''
 
 export default function AdminPage() {
@@ -133,6 +175,14 @@ export default function AdminPage() {
   }
   const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
   const [pricingSaving, setPricingSaving] = useState(false)
+  // Distribution state
+  const [distEpochs, setDistEpochs] = useState<DistributionEpoch[]>([])
+  const [revenueEvents, setRevenueEvents] = useState<RevenueEvent[]>([])
+  const [excludedWallets, setExcludedWallets] = useState<ExcludedWallet[]>([])
+  const [distSubview, setDistSubview] = useState<'epochs' | 'events' | 'excluded'>('epochs')
+  const [snapshotRunning, setSnapshotRunning] = useState(false)
+  const [newExcludedWallet, setNewExcludedWallet] = useState('')
+  const [newExcludedLabel, setNewExcludedLabel] = useState('')
 
   // Revoke access when admin wallet disconnects or changes
   useEffect(() => {
@@ -193,6 +243,15 @@ export default function AdminPage() {
         const d = await res.json()
         setPricingForm({ ...defaultPricing, ...d.settings })
       }
+    } else if (view === 'distribution') {
+      const [epochsRes, eventsRes, excludedRes] = await Promise.all([
+        fetch('/api/admin?view=distribution'),
+        fetch('/api/admin?view=revenue_events'),
+        fetch('/api/admin?view=excluded_wallets'),
+      ])
+      if (epochsRes.ok) { const d = await epochsRes.json(); setDistEpochs(d.epochs ?? []) }
+      if (eventsRes.ok) { const d = await eventsRes.json(); setRevenueEvents(d.events ?? []) }
+      if (excludedRes.ok) { const d = await excludedRes.json(); setExcludedWallets(d.wallets ?? []) }
     } else if (view === 'topups') {
       const res = await fetch('/api/admin?view=topups')
       if (res.ok) {
@@ -351,6 +410,41 @@ export default function AdminPage() {
     }
   }
 
+  const runDistributionAction = async (action: string, extra: Record<string, string> = {}) => {
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...extra }),
+    })
+    const d = await res.json()
+    if (res.ok) {
+      setActionMsg('Done ✓')
+      setTimeout(() => setActionMsg(''), 2000)
+      load()
+    } else {
+      setActionMsg(d.error ?? 'Error')
+    }
+    return { ok: res.ok, data: d }
+  }
+
+  const runRealSnapshot = async (epochId: string) => {
+    setSnapshotRunning(true)
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'run_snapshot', epochId }),
+    })
+    const d = await res.json()
+    setSnapshotRunning(false)
+    if (res.ok) {
+      setActionMsg(`Snapshot done: ${d.holdersSnapshotted} holders`)
+      setTimeout(() => setActionMsg(''), 3000)
+      load()
+    } else {
+      setActionMsg(d.error ?? 'Snapshot failed')
+    }
+  }
+
   if (!authed) {
     // Step 1: no wallet connected
     if (!publicKey) {
@@ -433,7 +527,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['pending', 'active', 'billing', 'epochs', 'pricing', 'topups', 'reset'] as AdminView[]).map((v) => (
+        {(['pending', 'active', 'billing', 'epochs', 'distribution', 'pricing', 'topups', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -446,7 +540,8 @@ export default function AdminPage() {
             {v === 'pending' ? 'Pending Approval'
               : v === 'active' ? 'Active Rentals'
               : v === 'billing' ? 'Billing Runs'
-              : v === 'epochs' ? 'Epochs'
+              : v === 'epochs' ? 'Epochs (legacy)'
+              : v === 'distribution' ? 'Distribution'
               : v === 'pricing' ? 'Pricing Settings'
               : v === 'topups' ? 'Top-ups'
               : 'Testing / Reset'}
@@ -1078,6 +1173,241 @@ export default function AdminPage() {
                   {pricingSaving ? 'Saving…' : 'Save pricing settings'}
                 </button>
               </form>
+            </div>
+          )}
+
+          {view === 'distribution' && (
+            <div className="space-y-4">
+              {/* Sub-tab bar */}
+              <div className="flex gap-1">
+                {(['epochs', 'events', 'excluded'] as const).map((sv) => (
+                  <button
+                    key={sv}
+                    onClick={() => setDistSubview(sv)}
+                    className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                      distSubview === sv ? 'bg-amber-400/20 text-amber-400' : 'text-white/40 hover:text-white'
+                    }`}
+                  >
+                    {sv === 'epochs' ? `Epochs (${distEpochs.length})`
+                      : sv === 'events' ? `Revenue Events (${revenueEvents.length})`
+                      : `Excluded Wallets (${excludedWallets.length})`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Epochs sub-tab */}
+              {distSubview === 'epochs' && (
+                <div className="space-y-5">
+                  {/* Quick actions */}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => runDistributionAction('create_epoch')}
+                      className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors"
+                    >
+                      + Create today&apos;s epoch (DRAFT)
+                    </button>
+                    <button
+                      onClick={() => runDistributionAction('seed_excluded_wallets')}
+                      className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
+                    >
+                      Seed excluded system wallets
+                    </button>
+                  </div>
+
+                  {/* Epoch cards */}
+                  {distEpochs.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No epochs yet. Create today&apos;s epoch to get started.</p>
+                  ) : distEpochs.map((ep) => {
+                    const gross = Number(ep.grossPool)
+                    const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
+                    const statusColor =
+                      ep.status === 'PUBLISHED' ? 'text-green-400 bg-green-400/10'
+                      : ep.status === 'CLOSED' ? 'text-white/30 bg-white/5'
+                      : ep.status === 'SNAPSHOTTED' ? 'text-blue-400 bg-blue-400/10'
+                      : ep.status === 'BILLED' ? 'text-amber-400 bg-amber-400/10'
+                      : 'text-white/50 bg-white/5'
+                    return (
+                      <div key={ep.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-white font-bold">{new Date(ep.epochDate).toLocaleDateString()}</div>
+                            <div className="text-white/25 text-[10px] font-mono">{ep.id}</div>
+                          </div>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor}`}>{ep.status}</span>
+                        </div>
+
+                        {/* Revenue breakdown */}
+                        {gross > 0 ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                            {[
+                              { label: 'Ad revenue', v: Number(ep.adRevenue), color: 'text-green-400' },
+                              { label: 'Fee revenue', v: Number(ep.tradingFeeRevenue), color: 'text-blue-400' },
+                              { label: 'Mgmt fee', v: Number(ep.managementFeeAmount), color: 'text-white/50' },
+                              { label: 'Claim pool', v: claimPool, color: 'text-green-400' },
+                            ].map(({ label, v, color }) => (
+                              <div key={label} className="bg-white/3 rounded p-2">
+                                <div className={`font-mono font-bold ${color}`}>${v.toFixed(2)}</div>
+                                <div className="text-white/30 text-[10px]">{label}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-white/30 text-xs">No revenue computed yet</div>
+                        )}
+
+                        {ep._count && (
+                          <div className="flex gap-4 text-xs text-white/40">
+                            <span>{ep._count.holderSnapshots} holder snapshots</span>
+                            <span>{ep._count.claims} claims</span>
+                            {ep.snapshotDate && <span>Snapshotted {new Date(ep.snapshotDate).toLocaleDateString()}</span>}
+                          </div>
+                        )}
+
+                        {/* Action buttons per status */}
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {ep.status === 'DRAFT' && (
+                            <button
+                              onClick={() => runDistributionAction('calculate_pool', { epochId: ep.id })}
+                              className="text-xs bg-white/10 hover:bg-white/20 text-white/70 px-3 py-1 rounded transition-colors"
+                            >
+                              Calculate pool
+                            </button>
+                          )}
+                          {(ep.status === 'BILLED' || ep.status === 'DRAFT') && (
+                            <button
+                              onClick={() => runRealSnapshot(ep.id)}
+                              disabled={snapshotRunning}
+                              className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1 rounded transition-colors disabled:opacity-50"
+                            >
+                              {snapshotRunning ? 'Snapshotting…' : 'Run holder snapshot'}
+                            </button>
+                          )}
+                          {ep.status === 'SNAPSHOTTED' && (
+                            <button
+                              onClick={() => runDistributionAction('publish_epoch', { epochId: ep.id })}
+                              className="text-xs bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 px-3 py-1 rounded transition-colors"
+                            >
+                              Publish
+                            </button>
+                          )}
+                          {ep.status === 'PUBLISHED' && (
+                            <button
+                              onClick={() => runDistributionAction('close_epoch', { epochId: ep.id })}
+                              className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/40 px-3 py-1 rounded transition-colors"
+                            >
+                              Close
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Revenue Events sub-tab */}
+              {distSubview === 'events' && (
+                <div className="space-y-2">
+                  {revenueEvents.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No revenue events yet.</p>
+                  ) : revenueEvents.map((ev) => {
+                    const typeColor =
+                      ev.type === 'AD_RENT_REVENUE' ? 'text-green-400 bg-green-400/10'
+                      : ev.type === 'TRADING_FEE_REVENUE' ? 'text-blue-400 bg-blue-400/10'
+                      : ev.type === 'MANAGEMENT_FEE' ? 'text-white/50 bg-white/5'
+                      : ev.type === 'CLAIM_POOL_ALLOCATION' ? 'text-amber-400 bg-amber-400/10'
+                      : ev.type === 'CLAIM_PAYOUT' ? 'text-green-400 bg-green-400/10'
+                      : ev.type === 'TOPUP_DEPOSIT' ? 'text-blue-300 bg-blue-300/10'
+                      : 'text-white/40 bg-white/5'
+                    return (
+                      <div key={ev.id} className="border border-white/5 rounded-lg px-4 py-2.5 bg-white/2 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium flex-shrink-0 ${typeColor}`}>
+                            {ev.type.replace(/_/g, ' ')}
+                          </span>
+                          <span className="text-white/25 text-[10px]">{ev.source}</span>
+                          {ev.txSignature && (
+                            <span className="text-white/20 text-[10px] font-mono truncate hidden sm:block">
+                              {ev.txSignature.slice(0, 10)}…
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                          <span className="font-mono font-bold text-sm text-white">${Number(ev.amount).toFixed(4)}</span>
+                          <span className="text-white/25 text-[10px]">{new Date(ev.createdAt).toLocaleDateString()}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Excluded Wallets sub-tab */}
+              {distSubview === 'excluded' && (
+                <div className="space-y-4">
+                  {/* Add wallet form */}
+                  <div className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                    <h3 className="text-sm font-bold text-white">Add excluded wallet</h3>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        value={newExcludedWallet}
+                        onChange={(e) => setNewExcludedWallet(e.target.value)}
+                        placeholder="Wallet address"
+                        className="flex-1 min-w-40 bg-white/5 border border-white/10 rounded px-3 py-1.5 text-white text-xs font-mono focus:outline-none focus:border-amber-400 placeholder-white/20"
+                      />
+                      <input
+                        value={newExcludedLabel}
+                        onChange={(e) => setNewExcludedLabel(e.target.value)}
+                        placeholder="Label (optional)"
+                        className="w-36 bg-white/5 border border-white/10 rounded px-3 py-1.5 text-white text-xs focus:outline-none focus:border-amber-400 placeholder-white/20"
+                      />
+                      <button
+                        disabled={!newExcludedWallet}
+                        onClick={async () => {
+                          await runDistributionAction('add_excluded_wallet', {
+                            walletAddress: newExcludedWallet,
+                            label: newExcludedLabel,
+                          })
+                          setNewExcludedWallet('')
+                          setNewExcludedLabel('')
+                        }}
+                        className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                      <button
+                        onClick={() => runDistributionAction('seed_excluded_wallets')}
+                        className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
+                      >
+                        Seed system wallets
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Wallet list */}
+                  {excludedWallets.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No excluded wallets. Seed system wallets to get started.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {excludedWallets.map((w) => (
+                        <div key={w.id} className="border border-white/5 rounded-lg px-4 py-2.5 bg-white/2 flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-mono text-white/70 truncate">{w.walletAddress}</div>
+                            {w.label && <div className="text-[10px] text-white/40">{w.label}</div>}
+                            {w.reason && <div className="text-[10px] text-white/25">{w.reason}</div>}
+                          </div>
+                          <button
+                            onClick={() => runDistributionAction('remove_excluded_wallet', { walletAddress: w.walletAddress })}
+                            className="text-[10px] text-red-400/50 hover:text-red-400 transition-colors flex-shrink-0"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

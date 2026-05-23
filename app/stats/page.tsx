@@ -1,28 +1,74 @@
 import { prisma } from '@/lib/prisma'
 import { TOTAL_TILES } from '@/lib/types'
+import { getTilePrice } from '@/lib/settings'
 
 async function getStats() {
   try {
-    const [activeTiles, pendingTiles, revenueAgg, billingRuns, epochs] = await Promise.all([
-      prisma.adRental.count({ where: { status: 'ACTIVE' } }),
-      prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
-      prisma.revenueEvent.aggregate({ _sum: { amount: true } }),
-      prisma.dailyBillingRun.findMany({
-        orderBy: { runDate: 'desc' },
-        take: 14,
-        select: { runDate: true, tilesCharged: true, totalRevenue: true, status: true },
-      }),
-      prisma.distributionEpoch.findMany({
-        orderBy: { epochDate: 'desc' },
-        take: 5,
-        select: { epochDate: true, totalPool: true, status: true },
-      }),
-    ])
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayEnd = new Date(today)
+    todayEnd.setHours(23, 59, 59, 999)
+
+    const [activeTiles, pendingTiles, revenueAgg, billingRuns, epochs, todayAd, todayFee, totalDistributed, tilePrice] =
+      await Promise.all([
+        prisma.adRental.count({ where: { status: 'ACTIVE' } }),
+        prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
+        prisma.revenueEvent.aggregate({
+          where: { type: { in: ['AD_RENT_REVENUE', 'TRADING_FEE_REVENUE'] } },
+          _sum: { amount: true },
+        }),
+        prisma.dailyBillingRun.findMany({
+          orderBy: { runDate: 'desc' },
+          take: 14,
+          select: { runDate: true, tilesCharged: true, totalRevenue: true, status: true },
+        }),
+        prisma.distributionEpoch.findMany({
+          orderBy: { epochDate: 'desc' },
+          take: 5,
+          select: {
+            epochDate: true,
+            grossPool: true,
+            managementFeeAmount: true,
+            claimPoolAmount: true,
+            totalPool: true,
+            status: true,
+          },
+        }),
+        prisma.revenueEvent.aggregate({
+          where: { type: 'AD_RENT_REVENUE', createdAt: { gte: today, lte: todayEnd } },
+          _sum: { amount: true },
+        }),
+        prisma.revenueEvent.aggregate({
+          where: { type: 'TRADING_FEE_REVENUE', createdAt: { gte: today, lte: todayEnd } },
+          _sum: { amount: true },
+        }),
+        prisma.revenueEvent.aggregate({
+          where: { type: 'CLAIM_PAYOUT' },
+          _sum: { amount: true },
+        }),
+        getTilePrice(),
+      ])
+
+    const todayAdRevenue = Number(todayAd._sum.amount ?? 0)
+    const todayFeeRevenue = Number(todayFee._sum.amount ?? 0)
+    const todayGross = todayAdRevenue + todayFeeRevenue
+    const todayMgmtFee = todayGross * 0.1
+    const todayClaimPool = todayGross - todayMgmtFee
+
     return {
       activeTiles,
       pendingTiles,
       availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
       totalRevenue: Number(revenueAgg._sum.amount ?? 0),
+      totalDistributed: Number(totalDistributed._sum.amount ?? 0),
+      tilePrice,
+      today: {
+        adRevenue: todayAdRevenue,
+        feeRevenue: todayFeeRevenue,
+        grossPool: todayGross,
+        managementFee: todayMgmtFee,
+        claimPool: todayClaimPool,
+      },
       billingRuns,
       epochs,
     }
@@ -32,15 +78,22 @@ async function getStats() {
       pendingTiles: 0,
       availableTiles: TOTAL_TILES,
       totalRevenue: 0,
+      totalDistributed: 0,
+      tilePrice: 1,
+      today: { adRevenue: 0, feeRevenue: 0, grossPool: 0, managementFee: 0, claimPool: 0 },
       billingRuns: [],
       epochs: [],
     }
   }
 }
 
+function fmt(n: number) {
+  return n.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
 export default async function StatsPage() {
   const s = await getStats()
-  const dailyRevenue = s.activeTiles * 1
+  const projectedDaily = s.activeTiles * s.tilePrice
 
   return (
     <div className="min-h-screen max-w-4xl mx-auto px-4 py-12">
@@ -52,16 +105,8 @@ export default async function StatsPage() {
         {[
           { label: 'Active tiles', value: s.activeTiles.toLocaleString(), color: 'text-green-400' },
           { label: 'Pending tiles', value: s.pendingTiles.toLocaleString(), color: 'text-amber-400' },
-          {
-            label: 'Available tiles',
-            value: s.availableTiles.toLocaleString(),
-            color: 'text-white',
-          },
-          {
-            label: 'Total revenue',
-            value: `$${s.totalRevenue.toLocaleString('en', { minimumFractionDigits: 2 })}`,
-            color: 'text-green-400',
-          },
+          { label: 'Available tiles', value: s.availableTiles.toLocaleString(), color: 'text-white' },
+          { label: 'Gross revenue', value: `$${fmt(s.totalRevenue)}`, color: 'text-green-400' },
         ].map(({ label, value, color }) => (
           <div key={label} className="border border-white/10 rounded-xl p-4 bg-white/2">
             <div className={`text-2xl font-black ${color}`}>{value}</div>
@@ -71,20 +116,42 @@ export default async function StatsPage() {
       </div>
 
       {/* Daily projection */}
-      <div className="border border-green-400/20 bg-green-400/5 rounded-xl p-5 mb-8">
+      <div className="border border-green-400/20 bg-green-400/5 rounded-xl p-5 mb-6">
         <div className="flex items-center justify-between">
           <div>
             <div className="text-xs text-green-400/70 uppercase tracking-widest mb-1">
               Today&apos;s projected revenue
             </div>
-            <div className="text-3xl font-black text-green-400">${dailyRevenue.toLocaleString()}</div>
+            <div className="text-3xl font-black text-green-400">${fmt(projectedDaily)}</div>
           </div>
           <div className="text-right text-xs text-white/30">
             <div>{s.activeTiles.toLocaleString()} active tiles</div>
-            <div>× $1.00/tile/day</div>
+            <div>× ${s.tilePrice.toFixed(2)}/tile/day</div>
           </div>
         </div>
       </div>
+
+      {/* Today's revenue breakdown */}
+      {s.today.grossPool > 0 && (
+        <div className="border border-white/10 rounded-xl p-5 mb-8 bg-white/2">
+          <h2 className="text-sm font-bold text-white mb-4">Today&apos;s revenue breakdown</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+            {[
+              { label: 'Ad rent revenue', value: `$${fmt(s.today.adRevenue)}`, color: 'text-green-400' },
+              { label: 'Trading fee revenue', value: `$${fmt(s.today.feeRevenue)}`, color: 'text-blue-400' },
+              { label: 'Gross pool', value: `$${fmt(s.today.grossPool)}`, color: 'text-white' },
+              { label: 'Management fee (10%)', value: `$${fmt(s.today.managementFee)}`, color: 'text-white/50' },
+              { label: 'Claim pool', value: `$${fmt(s.today.claimPool)}`, color: 'text-green-400' },
+              { label: 'Total distributed', value: `$${fmt(s.totalDistributed)}`, color: 'text-white/70' },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="bg-white/3 rounded-lg p-3">
+                <div className={`font-mono font-bold ${color}`}>{value}</div>
+                <div className="text-white/40 mt-0.5 uppercase tracking-wider">{label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Tile occupancy bar */}
       <div className="border border-white/10 rounded-xl p-5 mb-8">
@@ -105,15 +172,9 @@ export default async function StatsPage() {
           />
         </div>
         <div className="flex gap-4 mt-2 text-xs text-white/40">
-          <span>
-            <span className="text-green-400">■</span> Active
-          </span>
-          <span>
-            <span className="text-amber-400">■</span> Pending
-          </span>
-          <span>
-            <span className="text-white/20">■</span> Available
-          </span>
+          <span><span className="text-green-400">■</span> Active</span>
+          <span><span className="text-amber-400">■</span> Pending</span>
+          <span><span className="text-white/20">■</span> Available</span>
         </div>
       </div>
 
@@ -175,15 +236,12 @@ export default async function StatsPage() {
             {s.epochs.map((ep) => (
               <div
                 key={ep.epochDate.toString()}
-                className="flex items-center justify-between border border-white/10 rounded-lg px-4 py-3 bg-white/2"
+                className="border border-white/10 rounded-lg px-4 py-3 bg-white/2"
               >
-                <div>
+                <div className="flex items-center justify-between mb-1">
                   <div className="text-sm text-white">
                     {new Date(ep.epochDate).toLocaleDateString()}
                   </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <span className="font-mono text-green-400">${Number(ep.totalPool).toFixed(2)}</span>
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full ${
                       ep.status === 'PUBLISHED'
@@ -196,6 +254,18 @@ export default async function StatsPage() {
                     {ep.status}
                   </span>
                 </div>
+                {Number(ep.grossPool) > 0 && (
+                  <div className="flex gap-4 text-xs text-white/40">
+                    <span>Gross <span className="text-white/60">${fmt(Number(ep.grossPool))}</span></span>
+                    <span>Mgmt fee <span className="text-white/60">${fmt(Number(ep.managementFeeAmount))}</span></span>
+                    <span>Claim pool <span className="text-green-400">${fmt(Number(ep.claimPoolAmount || ep.totalPool))}</span></span>
+                  </div>
+                )}
+                {Number(ep.grossPool) === 0 && (
+                  <div className="text-xs text-white/40">
+                    Pool <span className="font-mono text-green-400">${fmt(Number(ep.totalPool))}</span>
+                  </div>
+                )}
               </div>
             ))}
           </div>

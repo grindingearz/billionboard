@@ -1,5 +1,11 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { env } from '@/lib/env'
+
+/** True only when the distribution wallet private key is configured server-side. */
+function isPayoutActive(): boolean {
+  return !!env.distributionWalletPrivateKey
+}
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
@@ -30,7 +36,7 @@ export async function GET(req: Request) {
     excluded: !!excluded,
     claimable,
     claims,
-    // TODO: real $BOARD token balance from Solana RPC
+    payoutActive: isPayoutActive(),
     tokenBalance: null,
   })
 }
@@ -56,9 +62,29 @@ export async function POST(req: Request) {
   const existing = await prisma.claim.findUnique({
     where: { epochId_walletAddress: { epochId, walletAddress: wallet } },
   })
-  if (existing) return NextResponse.json({ error: 'Already claimed' }, { status: 409 })
+  if (existing) {
+    return NextResponse.json({ error: 'Already claimed', status: existing.status }, { status: 409 })
+  }
 
-  // TODO: execute real Solana USDC transfer here
+  if (!isPayoutActive()) {
+    // Record intent but leave in PENDING until payout is live — prevents double-claim
+    const claim = await prisma.claim.create({
+      data: {
+        epochId,
+        walletAddress: wallet,
+        amount: snapshot.claimAmount,
+        status: 'PENDING',
+      },
+    })
+    return NextResponse.json({
+      ok: true,
+      claim,
+      payoutPending: true,
+      message: 'Claim registered. Payouts activate once the distribution wallet is configured.',
+    })
+  }
+
+  // TODO: execute real Solana USDC transfer from DISTRIBUTION_WALLET
   const claim = await prisma.claim.create({
     data: {
       epochId,
@@ -66,7 +92,7 @@ export async function POST(req: Request) {
       amount: snapshot.claimAmount,
       status: 'CLAIMED',
       claimedAt: new Date(),
-      txHash: `mock_tx_${Date.now()}`, // TODO: real Solana tx hash
+      txHash: null, // populated after Solana tx confirmed
     },
   })
 

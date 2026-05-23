@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
+import { getSetting } from '@/lib/settings'
+import { createRevenueEvent, getGrossRevenueForDate } from '@/lib/revenue'
+import { fetchTokenHolders } from '@/lib/helius'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -99,6 +102,32 @@ export async function GET(req: Request) {
       take: 10,
     })
     return NextResponse.json({ epochs })
+  }
+
+  if (view === 'distribution') {
+    const epochs = await prisma.distributionEpoch.findMany({
+      orderBy: { epochDate: 'desc' },
+      take: 30,
+      include: { _count: { select: { holderSnapshots: true, claims: true } } },
+    })
+    return NextResponse.json({ epochs })
+  }
+
+  if (view === 'revenue_events') {
+    const typeFilter = searchParams.get('type')
+    const events = await prisma.revenueEvent.findMany({
+      where: typeFilter ? { type: typeFilter as never } : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    })
+    return NextResponse.json({ events })
+  }
+
+  if (view === 'excluded_wallets') {
+    const wallets = await prisma.excludedWallet.findMany({
+      orderBy: { createdAt: 'desc' },
+    })
+    return NextResponse.json({ wallets })
   }
 
   if (view === 'billing') {
@@ -216,30 +245,209 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   }
 
-  if (action === 'publish_epoch') {
-    const { epochId } = body
-    await prisma.distributionEpoch.update({
-      where: { id: epochId },
-      data: { status: 'PUBLISHED' },
-    })
-    return NextResponse.json({ ok: true })
-  }
+  // ── Distribution actions ────────────────────────────────────────────────────
 
   if (action === 'create_epoch') {
-    const { totalPool, billingRunId } = body
-    const epoch = await prisma.distributionEpoch.create({
-      data: {
-        epochDate: new Date(),
-        totalPool: parseFloat(totalPool),
-        billingRunId: billingRunId ?? null,
-        status: 'PENDING',
+    // Create a DRAFT epoch for today (or a given date), or update an existing one
+    const epochDate = body.epochDate ? new Date(body.epochDate) : new Date()
+    epochDate.setHours(0, 0, 0, 0)
+
+    const epoch = await prisma.distributionEpoch.upsert({
+      where: { epochDate },
+      create: {
+        epochDate,
+        status: 'DRAFT',
+        billingRunId: body.billingRunId ?? null,
+      },
+      update: {
+        billingRunId: body.billingRunId ?? undefined,
       },
     })
     return NextResponse.json({ ok: true, epoch })
   }
 
+  if (action === 'calculate_pool') {
+    // Compute revenue breakdown from RevenueEvents for an epoch's date
+    const { epochId } = body
+    if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
+
+    const epoch = await prisma.distributionEpoch.findUnique({ where: { id: epochId } })
+    if (!epoch) return NextResponse.json({ error: 'Epoch not found' }, { status: 404 })
+
+    const feePercentStr = await getSetting('management_fee_percent')
+    const feePercent = parseFloat(feePercentStr)
+
+    const { adRevenue, tradingFeeRevenue, grossPool } = await getGrossRevenueForDate(epoch.epochDate)
+    const managementFeeAmount = (grossPool * feePercent) / 100
+    const claimPoolAmount = grossPool - managementFeeAmount
+
+    // Record management fee event if there's revenue
+    if (managementFeeAmount > 0) {
+      await createRevenueEvent({
+        type: 'MANAGEMENT_FEE',
+        source: 'admin',
+        amount: managementFeeAmount,
+        epochId,
+        metadata: { feePercent, grossPool },
+      })
+    }
+
+    if (claimPoolAmount > 0) {
+      await createRevenueEvent({
+        type: 'CLAIM_POOL_ALLOCATION',
+        source: 'admin',
+        amount: claimPoolAmount,
+        epochId,
+        metadata: { adRevenue, tradingFeeRevenue, grossPool, feePercent },
+      })
+    }
+
+    const updated = await prisma.distributionEpoch.update({
+      where: { id: epochId },
+      data: {
+        adRevenue,
+        tradingFeeRevenue,
+        grossPool,
+        managementFeePercent: feePercent,
+        managementFeeAmount,
+        claimPoolAmount,
+        totalPool: claimPoolAmount,
+        status: 'BILLED',
+      },
+    })
+    return NextResponse.json({ ok: true, epoch: updated })
+  }
+
+  if (action === 'run_snapshot') {
+    const { epochId } = body
+    if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
+
+    const boardMint = process.env.NEXT_PUBLIC_BOARD_MINT ?? ''
+    if (!boardMint) {
+      return NextResponse.json(
+        { error: '$BOARD token not launched yet. Set NEXT_PUBLIC_BOARD_MINT to enable snapshots.' },
+        { status: 400 }
+      )
+    }
+
+    const heliusApiKey = env.heliusApiKey
+    if (!heliusApiKey) {
+      return NextResponse.json({ error: 'HELIUS_API_KEY not configured' }, { status: 400 })
+    }
+
+    const epoch = await prisma.distributionEpoch.findUnique({ where: { id: epochId } })
+    if (!epoch) return NextResponse.json({ error: 'Epoch not found' }, { status: 404 })
+
+    // Fetch excluded wallets to skip system wallets
+    const excluded = await prisma.excludedWallet.findMany({ select: { walletAddress: true } })
+    const excludedSet = new Set(excluded.map((e) => e.walletAddress))
+
+    const holders = await fetchTokenHolders(boardMint, heliusApiKey)
+    const eligibleHolders = holders.filter((h) => !excludedSet.has(h.walletAddress))
+
+    const totalSupply = eligibleHolders.reduce((sum, h) => sum + BigInt(h.balance), 0n)
+    const claimPool = Number(epoch.claimPoolAmount)
+
+    const snapshotDate = new Date()
+    await prisma.$transaction([
+      prisma.distributionEpoch.update({
+        where: { id: epochId },
+        data: {
+          status: 'SNAPSHOTTED',
+          snapshotDate,
+          eligibleSupply: totalSupply.toString(),
+        },
+      }),
+      ...eligibleHolders.map((h) =>
+        prisma.holderSnapshot.upsert({
+          where: { epochId_walletAddress: { epochId, walletAddress: h.walletAddress } },
+          update: { tokenBalance: h.balance },
+          create: {
+            epochId,
+            walletAddress: h.walletAddress,
+            tokenBalance: h.balance,
+            claimAmount:
+              totalSupply > 0n
+                ? (Number(BigInt(h.balance) * BigInt(Math.round(claimPool * 1e6))) / Number(totalSupply)) / 1e6
+                : 0,
+          },
+        })
+      ),
+    ])
+
+    return NextResponse.json({
+      ok: true,
+      holdersSnapshotted: eligibleHolders.length,
+      eligibleSupply: totalSupply.toString(),
+    })
+  }
+
+  if (action === 'publish_epoch') {
+    const { epochId } = body
+    if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
+    const epoch = await prisma.distributionEpoch.update({
+      where: { id: epochId },
+      data: { status: 'PUBLISHED', publishedAt: new Date() },
+    })
+    return NextResponse.json({ ok: true, epoch })
+  }
+
+  if (action === 'close_epoch') {
+    const { epochId } = body
+    if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
+    const epoch = await prisma.distributionEpoch.update({
+      where: { id: epochId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    })
+    return NextResponse.json({ ok: true, epoch })
+  }
+
+  if (action === 'add_excluded_wallet') {
+    const { walletAddress, label, reason } = body
+    if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
+    const wallet = await prisma.excludedWallet.upsert({
+      where: { walletAddress },
+      create: { walletAddress, label: label ?? null, reason: reason ?? null },
+      update: { label: label ?? undefined, reason: reason ?? undefined },
+    })
+    return NextResponse.json({ ok: true, wallet })
+  }
+
+  if (action === 'remove_excluded_wallet') {
+    const { walletAddress } = body
+    if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
+    await prisma.excludedWallet.delete({ where: { walletAddress } })
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'seed_excluded_wallets') {
+    // Seed system wallets that should not receive holder distributions
+    const systemWallets = [
+      { key: 'AD_REVENUE_WALLET', label: 'Ad Revenue Wallet', reason: 'System wallet — receives ad topups' },
+      { key: 'FEE_CREATOR_WALLET', label: 'Fee Creator Wallet', reason: 'System wallet — receives trading fees' },
+      { key: 'DISTRIBUTION_WALLET', label: 'Distribution Wallet', reason: 'System wallet — pays out claims' },
+      { key: 'MANAGEMENT_WALLET', label: 'Management Wallet', reason: 'System wallet — receives management fee' },
+      { key: 'TREASURY_WALLET', label: 'Treasury Wallet', reason: 'System wallet — long-term reserve' },
+      { key: 'ADMIN_WALLET', label: 'Admin Wallet', reason: 'System wallet — admin control' },
+    ]
+
+    const created: string[] = []
+    for (const w of systemWallets) {
+      const addr = process.env[w.key]
+      if (!addr) continue
+      await prisma.excludedWallet.upsert({
+        where: { walletAddress: addr },
+        create: { walletAddress: addr, label: w.label, reason: w.reason },
+        update: { label: w.label, reason: w.reason },
+      })
+      created.push(addr)
+    }
+    return NextResponse.json({ ok: true, seeded: created.length, wallets: created })
+  }
+
+  // ── Legacy create_epoch (old totalPool form) — kept for backward compat ────
+
   if (action === 'snapshot_epoch') {
-    // TODO: replace with real $BOARD token holder indexing from Solana RPC
     const { epochId, mockHolders } = body
     if (!Array.isArray(mockHolders)) {
       return NextResponse.json({ error: 'mockHolders array required' }, { status: 400 })
@@ -257,7 +465,7 @@ export async function POST(req: Request) {
     await prisma.$transaction([
       prisma.distributionEpoch.update({
         where: { id: epochId },
-        data: { status: 'SNAPSHOT_TAKEN', snapshotDate: new Date() },
+        data: { status: 'SNAPSHOTTED', snapshotDate: new Date() },
       }),
       ...mockHolders.map((h: { wallet: string; balance: number }) =>
         prisma.holderSnapshot.upsert({
@@ -276,8 +484,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   }
 
+  // ── Topup management ────────────────────────────────────────────────────────
+
   if (action === 'assign_topup') {
-    // Manually assign an unmatched ProcessedTransaction to a user's balance
     const { txId, userId } = body
     const tx = await prisma.processedTransaction.findUnique({ where: { id: txId } })
     if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
@@ -333,6 +542,8 @@ export async function POST(req: Request) {
     return NextResponse.json(d)
   }
 
+  // ── Test / dev tooling ──────────────────────────────────────────────────────
+
   if (action === 'reset_test_account') {
     const { walletAddress } = body
     if (!walletAddress) return NextResponse.json({ error: 'walletAddress required' }, { status: 400 })
@@ -341,18 +552,15 @@ export async function POST(req: Request) {
     if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 })
 
     await prisma.$transaction([
-      // Zero the balance
       prisma.advertiserWallet.upsert({
         where: { userId: user.id },
         update: { usdcBalance: 0 },
         create: { userId: user.id, usdcBalance: 0 },
       }),
-      // Expire all pending real topups
       prisma.topup.updateMany({
         where: { userId: user.id, method: 'usdc_solana', status: 'PENDING' },
         data: { status: 'EXPIRED' },
       }),
-      // Reject non-terminal mock topups (CONFIRMED mock topups stay as history)
       prisma.topup.updateMany({
         where: { userId: user.id, method: 'mock', status: { notIn: ['CONFIRMED', 'REJECTED', 'FAILED'] } },
         data: { status: 'REJECTED' },
