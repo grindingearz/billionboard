@@ -32,6 +32,8 @@ interface RentalOrder {
   status: string
   createdAt: string
   startDate: string | null
+  nextBillingAt: string | null
+  lastBilledAt: string | null
   dailyRateTotal: number
   creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
   user: { email: string | null; walletAddress: string | null }
@@ -1038,6 +1040,16 @@ export default function AdminPage() {
                           <div className="text-white/30 text-xs mt-1">
                             Live since: {order.startDate ? new Date(order.startDate).toLocaleString() : new Date(order.createdAt).toLocaleString()}
                           </div>
+                          {order.nextBillingAt && (
+                            <div className="text-white/20 text-[10px] font-mono mt-0.5">
+                              Next billing: {new Date(order.nextBillingAt).toLocaleString()}
+                            </div>
+                          )}
+                          {order.lastBilledAt && (
+                            <div className="text-white/20 text-[10px] font-mono">
+                              Last billed: {new Date(order.lastBilledAt).toLocaleString()}
+                            </div>
+                          )}
                         </div>
                         <div className="flex flex-col gap-1.5 flex-shrink-0">
                           <button

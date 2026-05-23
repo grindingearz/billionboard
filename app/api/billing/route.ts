@@ -29,8 +29,14 @@ export async function POST(req: Request) {
     await prisma.dailyBillingRun.delete({ where: { id: existing.id } })
   }
 
+  const now = new Date()
+
+  // Only bill rentals that are due: nextBillingAt IS NULL (legacy) or nextBillingAt <= now
   const activeRentals = await prisma.adRental.findMany({
-    where: { status: 'ACTIVE' },
+    where: {
+      status: 'ACTIVE',
+      OR: [{ nextBillingAt: null }, { nextBillingAt: { lte: now } }],
+    },
     include: { user: { include: { advertiserWallet: true } } },
   })
 
@@ -45,6 +51,7 @@ export async function POST(req: Request) {
   let totalRevenue = 0
   let tilesCharged = 0
   const expired: string[] = []
+  const billedRentalDetails: Array<{ id: string; currentNextBillingAt: Date | null }> = []
   const revenueEvents: Array<{
     type: 'AD_RENT_REVENUE'
     source: string
@@ -93,6 +100,7 @@ export async function POST(req: Request) {
     tilesCharged += rentals.length
 
     for (const r of rentals) {
+      billedRentalDetails.push({ id: r.id, currentNextBillingAt: r.nextBillingAt })
       revenueEvents.push({
         type: 'AD_RENT_REVENUE',
         source: 'billing',
@@ -144,6 +152,17 @@ export async function POST(req: Request) {
     ...(revenueEvents.length > 0
       ? [prisma.revenueEvent.createMany({ data: revenueEvents })]
       : []),
+    // Advance nextBillingAt for each successfully billed rental
+    ...billedRentalDetails.map(({ id, currentNextBillingAt }) => {
+      const base = currentNextBillingAt?.getTime() ?? now.getTime()
+      return prisma.adRental.update({
+        where: { id },
+        data: {
+          nextBillingAt: new Date(base + 24 * 60 * 60 * 1000),
+          lastBilledAt: now,
+        },
+      })
+    }),
     // Update billing run
     prisma.dailyBillingRun.update({
       where: { id: billingRun.id },

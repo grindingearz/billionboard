@@ -105,6 +105,8 @@ export async function GET(req: Request) {
       status: string
       createdAt: Date
       startDate: Date | null
+      nextBillingAt: Date | null
+      lastBilledAt: Date | null
       dailyRateTotal: number
       creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
       user: { email: string | null; walletAddress: string | null }
@@ -122,6 +124,8 @@ export async function GET(req: Request) {
           status: rental.status,
           createdAt: rental.createdAt,
           startDate: rental.startDate,
+          nextBillingAt: rental.nextBillingAt,
+          lastBilledAt: rental.lastBilledAt,
           dailyRateTotal: 0,
           creative: rental.creative
             ? { imageUrl: rental.creative.imageUrl, destUrl: rental.creative.destUrl,
@@ -273,9 +277,14 @@ export async function POST(req: Request) {
   if (action === 'approve_order') {
     const { creativeId } = body
     if (!creativeId) return NextResponse.json({ error: 'creativeId required' }, { status: 400 })
+    const approvedAt = new Date()
     await prisma.adRental.updateMany({
       where: { creativeId, status: 'PENDING_APPROVAL' },
-      data: { status: 'ACTIVE', startDate: new Date() },
+      data: {
+        status: 'ACTIVE',
+        startDate: approvedAt,
+        nextBillingAt: new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000),
+      },
     })
     return NextResponse.json({ ok: true })
   }
@@ -291,9 +300,14 @@ export async function POST(req: Request) {
   }
 
   if (action === 'approve_all_orders') {
+    const approvedAt = new Date()
     const result = await prisma.adRental.updateMany({
       where: { status: 'PENDING_APPROVAL' },
-      data: { status: 'ACTIVE', startDate: new Date() },
+      data: {
+        status: 'ACTIVE',
+        startDate: approvedAt,
+        nextBillingAt: new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000),
+      },
     })
     return NextResponse.json({ ok: true, count: result.count })
   }

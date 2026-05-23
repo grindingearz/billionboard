@@ -104,6 +104,7 @@ export async function POST(req: Request) {
   }
 
   // Create creative + rentals in a transaction
+  const now = new Date()
   const result = await prisma.$transaction(async (tx) => {
     const creative = await tx.adCreative.create({
       data: { userId: session.userId, imageUrl, destUrl: normalizedDestUrl, altText: altText ?? null, displayMode },
@@ -116,7 +117,8 @@ export async function POST(req: Request) {
             tileId,
             creativeId: creative.id,
             status: autoApprove ? 'ACTIVE' : 'PENDING_APPROVAL',
-            startDate: autoApprove ? new Date() : null,
+            startDate: autoApprove ? now : null,
+            nextBillingAt: autoApprove ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : null,
             dailyRate,
           },
         })
