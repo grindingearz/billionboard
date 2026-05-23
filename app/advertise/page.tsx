@@ -504,24 +504,6 @@ export default function AdvertisePage() {
                 >
                   Connect Wallet
                 </button>
-                {/* Dev fallback: manual paste */}
-                {process.env.NODE_ENV !== 'production' && (
-                  <form onSubmit={handleSaveWallet} className="flex gap-2 pt-1 border-t border-white/5">
-                    <input
-                      value={walletInput}
-                      onChange={(e) => setWalletInput(e.target.value)}
-                      placeholder="Dev: paste address manually"
-                      className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-[10px] font-mono focus:outline-none focus:border-green-400 placeholder-white/20"
-                    />
-                    <button
-                      type="submit"
-                      disabled={savingWallet || walletInput.trim() === walletAddress}
-                      className="text-[10px] bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded transition-colors disabled:opacity-40"
-                    >
-                      {savingWallet ? '…' : 'Save'}
-                    </button>
-                  </form>
-                )}
               </div>
             )}
 
@@ -578,8 +560,9 @@ export default function AdvertisePage() {
               </div>
             )}
 
-            {/* Dev-only mock top-up */}
-            {process.env.NODE_ENV !== 'production' && (
+            {/* Dev-only mock top-up — admin wallet only */}
+            {process.env.NODE_ENV !== 'production' &&
+             publicKey?.toBase58() === process.env.NEXT_PUBLIC_ADMIN_WALLET && (
               <form onSubmit={handleMockTopup} className="flex items-center gap-2 pt-2 border-t border-white/5">
                 <span className="text-[10px] text-amber-400/60 uppercase tracking-widest">Dev only</span>
                 <input

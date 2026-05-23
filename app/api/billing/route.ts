@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
+import { env } from '@/lib/env'
 
 // POST /api/billing — trigger daily billing run (admin or cron secret)
 export async function POST(req: Request) {
@@ -8,7 +9,8 @@ export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET
 
-  const isAdmin = session?.role === 'ADMIN'
+  const adminWallet = env.adminWallet
+  const isAdmin = session?.role === 'ADMIN' && !!adminWallet && session.adminWallet === adminWallet
   const isCron = cronSecret && authHeader === `Bearer ${cronSecret}`
 
   if (!isAdmin && !isCron) {

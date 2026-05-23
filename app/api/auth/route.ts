@@ -2,13 +2,18 @@ import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { prisma } from '@/lib/prisma'
 import { createSessionToken, sessionCookieOptions } from '@/lib/auth'
+import { env } from '@/lib/env'
 
 export async function POST(req: Request) {
   const body = await req.json()
   const { email, walletAddress, adminPassword } = body
 
-  // Admin login
+  // Admin login — requires both ADMIN_WALLET match AND correct ADMIN_PASSWORD
   if (adminPassword) {
+    const adminWallet = env.adminWallet
+    if (!adminWallet || walletAddress !== adminWallet) {
+      return NextResponse.json({ error: 'WALLET_NOT_ADMIN' }, { status: 403 })
+    }
     const expected = process.env.ADMIN_PASSWORD
     if (!expected || adminPassword !== expected) {
       return NextResponse.json({ error: 'Invalid admin password' }, { status: 401 })
@@ -19,7 +24,7 @@ export async function POST(req: Request) {
         data: { email: 'admin@billionboard.internal', role: 'ADMIN' },
       })
     }
-    const token = await createSessionToken({ userId: user.id, role: 'ADMIN' })
+    const token = await createSessionToken({ userId: user.id, role: 'ADMIN', adminWallet })
     const cookieStore = await cookies()
     cookieStore.set(sessionCookieOptions().name, token, sessionCookieOptions())
     return NextResponse.json({ ok: true, role: 'ADMIN' })

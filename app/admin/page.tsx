@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
+import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
 type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups'
 
@@ -64,7 +66,14 @@ interface UnmatchedTx {
   source: string
 }
 
+const ADMIN_WALLET = process.env.NEXT_PUBLIC_ADMIN_WALLET ?? ''
+
 export default function AdminPage() {
+  const { publicKey } = useWallet()
+  const { setVisible: openWalletModal } = useWalletModal()
+  const connectedAddress = publicKey?.toBase58() ?? ''
+  const isAdminWallet = !!ADMIN_WALLET && connectedAddress === ADMIN_WALLET
+
   const [authed, setAuthed] = useState(false)
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
@@ -92,18 +101,28 @@ export default function AdminPage() {
   const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
   const [pricingSaving, setPricingSaving] = useState(false)
 
+  // Revoke access when admin wallet disconnects or changes
+  useEffect(() => {
+    if (authed && !isAdminWallet) {
+      setAuthed(false)
+      setPassword('')
+      setAuthError('')
+    }
+  }, [isAdminWallet, authed])
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     const res = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPassword: password }),
+      body: JSON.stringify({ adminPassword: password, walletAddress: connectedAddress }),
     })
     if (res.ok) {
       setAuthed(true)
       setAuthError('')
     } else {
-      setAuthError('Invalid password')
+      const d = await res.json()
+      setAuthError(d.error === 'WALLET_NOT_ADMIN' ? 'Wallet not authorized.' : 'Invalid password')
     }
   }
 
@@ -235,10 +254,48 @@ export default function AdminPage() {
   }
 
   if (!authed) {
+    // Step 1: no wallet connected
+    if (!publicKey) {
+      return (
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <div className="w-full max-w-xs text-center">
+            <h1 className="text-xl font-black text-amber-400 mb-4">Admin</h1>
+            <p className="text-white/50 text-sm mb-6">Connect the admin wallet to continue.</p>
+            <button
+              onClick={() => openWalletModal(true)}
+              className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-6 py-2.5 rounded-lg text-sm transition-colors"
+            >
+              Connect Wallet
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    // Step 2: wrong wallet connected
+    if (!isAdminWallet) {
+      return (
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <div className="w-full max-w-xs text-center">
+            <h1 className="text-xl font-black text-amber-400 mb-4">Admin</h1>
+            <p className="text-red-400 text-sm mb-3">This wallet is not authorized for admin access.</p>
+            <p className="text-white/20 text-xs font-mono">{connectedAddress.slice(0, 8)}…{connectedAddress.slice(-4)}</p>
+          </div>
+        </div>
+      )
+    }
+
+    // Step 3: correct admin wallet — require password
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="w-full max-w-xs">
-          <h1 className="text-xl font-black text-amber-400 mb-4">Admin</h1>
+          <h1 className="text-xl font-black text-amber-400 mb-1">Admin</h1>
+          <div className="flex items-center gap-2 mb-5">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400 flex-shrink-0" />
+            <span className="text-green-400/70 text-xs font-mono">
+              {connectedAddress.slice(0, 6)}…{connectedAddress.slice(-4)}
+            </span>
+          </div>
           <form onSubmit={handleLogin} className="space-y-3">
             <input
               type="password"

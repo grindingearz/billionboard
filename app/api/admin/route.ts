@@ -1,10 +1,13 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
+import { env } from '@/lib/env'
 
 async function requireAdmin() {
   const session = await getSession()
   if (!session || session.role !== 'ADMIN') return null
+  const adminWallet = env.adminWallet
+  if (!adminWallet || session.adminWallet !== adminWallet) return null
   return session
 }
 

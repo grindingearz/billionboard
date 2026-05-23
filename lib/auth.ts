@@ -7,6 +7,8 @@ const secret = () => new TextEncoder().encode(env.sessionSecret)
 export interface SessionPayload {
   userId: string
   role: 'ADVERTISER' | 'ADMIN'
+  /** Set only for ADMIN sessions; tied to the verified ADMIN_WALLET address. */
+  adminWallet?: string
 }
 
 export async function getSession(): Promise<SessionPayload | null> {
