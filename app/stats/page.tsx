@@ -2,6 +2,8 @@ import { prisma } from '@/lib/prisma'
 import { TOTAL_TILES } from '@/lib/types'
 import { getTilePrice, getSetting } from '@/lib/settings'
 import { getOrCreateEpoch, todayUtc, msUntilUtcClose, formatUtcDate } from '@/lib/epoch'
+import FeeFlowExplainer from '@/components/FeeFlowExplainer'
+import TokenCA from '@/components/TokenCA'
 
 async function getStats() {
   try {
@@ -224,7 +226,7 @@ export default async function StatsPage() {
               { label: 'Advertising fees', value: `$${fmt(s.today.adRevenue)}`, color: 'text-green-400' },
               { label: 'Trading fees', value: `$${fmt(s.today.feeRevenue)}`, color: 'text-blue-400' },
               { label: 'Gross fees', value: `$${fmt(s.today.grossPool)}`, color: 'text-white' },
-              { label: `Mgmt fee (${s.feePercent}%)`, value: `$${fmt(s.today.managementFee)}`, color: 'text-white/50' },
+              { label: `Treasury fee (${s.feePercent}%)`, value: `$${fmt(s.today.managementFee)}`, color: 'text-white/50' },
               { label: 'Balance to distribute', value: `$${fmt(s.today.claimPool)}`, color: 'text-green-400' },
               {
                 label: '$BOARD mint',
@@ -260,8 +262,8 @@ export default async function StatsPage() {
                   <th className="pb-2 text-right font-medium whitespace-nowrap">Ad Fees</th>
                   <th className="pb-2 text-right font-medium whitespace-nowrap">Trading Fees</th>
                   <th className="pb-2 text-right font-medium whitespace-nowrap">Gross</th>
-                  <th className="pb-2 text-right font-medium whitespace-nowrap">Mgmt %</th>
-                  <th className="pb-2 text-right font-medium whitespace-nowrap">Mgmt $</th>
+                  <th className="pb-2 text-right font-medium whitespace-nowrap">Treasury %</th>
+                  <th className="pb-2 text-right font-medium whitespace-nowrap">Treasury $</th>
                   <th className="pb-2 text-right font-medium whitespace-nowrap">To Distribute</th>
                   <th className="pb-2 text-right font-medium whitespace-nowrap">Supply</th>
                   <th className="pb-2 text-right font-medium whitespace-nowrap">Status</th>
@@ -415,6 +417,18 @@ export default async function StatsPage() {
           No billing data yet. Revenue starts flowing once ads go live.
         </div>
       )}
+
+      {/* Fee flow explainer */}
+      <div className="mb-8">
+        <FeeFlowExplainer feePercent={s.feePercent} />
+      </div>
+
+      {/* Token CA */}
+      <TokenCA
+        mint={process.env.NEXT_PUBLIC_BOARD_MINT ?? ''}
+        pumpfunUrl={process.env.NEXT_PUBLIC_BOARD_PUMPFUN_URL ?? ''}
+        officialXUrl={process.env.NEXT_PUBLIC_OFFICIAL_X_URL ?? ''}
+      />
     </div>
   )
 }
