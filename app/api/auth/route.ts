@@ -8,16 +8,24 @@ export async function POST(req: Request) {
   const body = await req.json()
   const { email, walletAddress, adminPassword } = body
 
-  // Admin login — requires both ADMIN_WALLET match AND correct ADMIN_PASSWORD
-  if (adminPassword) {
-    const adminWallet = env.adminWallet
-    if (!adminWallet || walletAddress !== adminWallet) {
-      return NextResponse.json({ error: 'WALLET_NOT_ADMIN' }, { status: 403 })
+  // Admin login — requires BOTH correct wallet AND correct password
+  if (adminPassword !== undefined && adminPassword !== null) {
+    const adminWallet = env.adminWallet  // already trimmed via env.ts
+    if (!adminWallet) {
+      return NextResponse.json({ error: 'ADMIN_WALLET is not configured.' }, { status: 503 })
     }
-    const expected = process.env.ADMIN_PASSWORD
-    if (!expected || adminPassword !== expected) {
-      return NextResponse.json({ error: 'Invalid admin password' }, { status: 401 })
+
+    const submittedWallet = (walletAddress ?? '').trim()
+    if (!submittedWallet || submittedWallet !== adminWallet) {
+      return NextResponse.json({ error: 'Connected wallet is not authorized.' }, { status: 403 })
     }
+
+    const expectedPassword = env.adminPassword  // trimmed
+    const submittedPassword = (adminPassword as string).trim()
+    if (!expectedPassword || submittedPassword !== expectedPassword) {
+      return NextResponse.json({ error: 'Invalid admin password.' }, { status: 401 })
+    }
+
     let user = await prisma.user.findFirst({ where: { role: 'ADMIN' } })
     if (!user) {
       user = await prisma.user.create({

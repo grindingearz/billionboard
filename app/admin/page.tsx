@@ -132,17 +132,22 @@ interface ExcludedWallet {
   createdAt: string
 }
 
-const ADMIN_WALLET = process.env.NEXT_PUBLIC_ADMIN_WALLET ?? ''
+interface DebugAuth {
+  hasAdminWalletEnv: boolean
+  maskedAdminWallet: string | null
+  walletMatch: boolean
+  isAdminSession: boolean
+}
 
 export default function AdminPage() {
   const { publicKey } = useWallet()
   const { setVisible: openWalletModal } = useWalletModal()
   const connectedAddress = publicKey?.toBase58() ?? ''
-  const isAdminWallet = !!ADMIN_WALLET && connectedAddress === ADMIN_WALLET
 
   const [authed, setAuthed] = useState(false)
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
+  const [debugAuth, setDebugAuth] = useState<DebugAuth | null>(null)
   const [view, setView] = useState<AdminView>('pending')
   const [rentals, setRentals] = useState<Rental[]>([])
   const [pendingOrders, setPendingOrders] = useState<RentalOrder[]>([])
@@ -184,17 +189,35 @@ export default function AdminPage() {
   const [newExcludedWallet, setNewExcludedWallet] = useState('')
   const [newExcludedLabel, setNewExcludedLabel] = useState('')
 
-  // Revoke access when admin wallet disconnects or changes
+  // Fetch server-side wallet match info whenever connected wallet changes
   useEffect(() => {
-    if (authed && !isAdminWallet) {
+    const url = connectedAddress
+      ? `/api/admin/debug-auth?wallet=${encodeURIComponent(connectedAddress)}`
+      : '/api/admin/debug-auth'
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: DebugAuth | null) => {
+        setDebugAuth(d)
+        // If an existing session is still valid, skip password re-entry
+        if (d?.isAdminSession && d?.walletMatch) {
+          setAuthed(true)
+        }
+      })
+      .catch(() => setDebugAuth(null))
+  }, [connectedAddress])
+
+  // Revoke access when admin wallet disconnects or changes away from admin wallet
+  useEffect(() => {
+    if (authed && debugAuth !== null && !debugAuth.walletMatch) {
       setAuthed(false)
       setPassword('')
       setAuthError('')
     }
-  }, [isAdminWallet, authed])
+  }, [debugAuth, authed])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
+    setAuthError('')
     const res = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -205,7 +228,7 @@ export default function AdminPage() {
       setAuthError('')
     } else {
       const d = await res.json()
-      setAuthError(d.error === 'WALLET_NOT_ADMIN' ? 'Wallet not authorized.' : 'Invalid password')
+      setAuthError(d.error ?? 'Login failed')
     }
   }
 
@@ -446,6 +469,35 @@ export default function AdminPage() {
   }
 
   if (!authed) {
+    // Debug info panel — shown on all login screens
+    const DebugPanel = () => (
+      <div className="mt-6 border border-white/5 rounded-lg p-3 bg-white/2 text-[10px] font-mono space-y-1 text-left">
+        <div className="text-white/30 uppercase tracking-widest mb-1.5">Auth debug</div>
+        <div className="flex justify-between gap-2">
+          <span className="text-white/30">ADMIN_WALLET set</span>
+          <span className={debugAuth?.hasAdminWalletEnv ? 'text-green-400' : 'text-red-400'}>
+            {debugAuth === null ? '…' : debugAuth.hasAdminWalletEnv ? 'yes' : 'no'}
+          </span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-white/30">configured wallet</span>
+          <span className="text-white/50">{debugAuth?.maskedAdminWallet ?? '—'}</span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-white/30">connected wallet</span>
+          <span className="text-white/50">
+            {connectedAddress ? `${connectedAddress.slice(0, 4)}…${connectedAddress.slice(-4)}` : '—'}
+          </span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-white/30">wallet match</span>
+          <span className={debugAuth?.walletMatch ? 'text-green-400' : 'text-red-400'}>
+            {debugAuth === null ? '…' : debugAuth.walletMatch ? 'yes' : 'no'}
+          </span>
+        </div>
+      </div>
+    )
+
     // Step 1: no wallet connected
     if (!publicKey) {
       return (
@@ -459,25 +511,36 @@ export default function AdminPage() {
             >
               Connect Wallet
             </button>
+            {!debugAuth?.hasAdminWalletEnv && debugAuth !== null && (
+              <p className="text-red-400/70 text-xs mt-4">ADMIN_WALLET is not configured.</p>
+            )}
+            <DebugPanel />
           </div>
         </div>
       )
     }
 
-    // Step 2: wrong wallet connected
-    if (!isAdminWallet) {
+    // Step 2: wallet connected but waiting for debug-auth response, or wrong wallet
+    if (!debugAuth?.walletMatch) {
+      const stillLoading = debugAuth === null
       return (
         <div className="min-h-screen flex items-center justify-center px-4">
           <div className="w-full max-w-xs text-center">
             <h1 className="text-xl font-black text-amber-400 mb-4">Admin</h1>
-            <p className="text-red-400 text-sm mb-3">This wallet is not authorized for admin access.</p>
-            <p className="text-white/20 text-xs font-mono">{connectedAddress.slice(0, 8)}…{connectedAddress.slice(-4)}</p>
+            {stillLoading ? (
+              <p className="text-white/30 text-sm animate-pulse">Checking wallet…</p>
+            ) : !debugAuth.hasAdminWalletEnv ? (
+              <p className="text-red-400 text-sm">ADMIN_WALLET is not configured.</p>
+            ) : (
+              <p className="text-red-400 text-sm">This wallet is not authorized for admin access.</p>
+            )}
+            <DebugPanel />
           </div>
         </div>
       )
     }
 
-    // Step 3: correct admin wallet — require password
+    // Step 3: correct admin wallet confirmed by server — require password
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="w-full max-w-xs">
@@ -494,6 +557,7 @@ export default function AdminPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Admin password"
+              autoFocus
               className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/30 text-sm focus:outline-none focus:border-amber-400"
             />
             {authError && <p className="text-red-400 text-xs">{authError}</p>}
@@ -504,6 +568,7 @@ export default function AdminPage() {
               Sign in
             </button>
           </form>
+          <DebugPanel />
         </div>
       </div>
     )

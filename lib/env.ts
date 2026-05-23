@@ -11,7 +11,7 @@
  */
 
 function required(name: string): string {
-  const value = process.env[name]
+  const value = process.env[name]?.trim()
   if (!value && process.env.NODE_ENV === 'production') {
     throw new Error(
       `Missing required environment variable: ${name}\n` +
@@ -23,11 +23,12 @@ function required(name: string): string {
 }
 
 function optional(name: string): string | null {
-  return process.env[name] ?? null
+  const v = process.env[name]?.trim()
+  return v || null
 }
 
 function withDefault(name: string, fallback: string): string {
-  return process.env[name] ?? fallback
+  return process.env[name]?.trim() || fallback
 }
 
 export const env = {
