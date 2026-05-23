@@ -79,11 +79,13 @@ export default function Loupe({
     const tileLeft = centerTileScreen - tileDisplaySize / 2
     const tileTop = centerTileScreen - tileDisplaySize / 2
 
-    ctx.fillStyle = isSelected ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.15)'
-    ctx.fillRect(tileLeft, tileTop, tileDisplaySize, tileDisplaySize)
-
-    ctx.strokeStyle = isSelected ? '#60a5fa' : '#ffffff'
-    ctx.lineWidth = 1.5
+    const isActiveAdTile = status === 'ACTIVE' && !!info?.imageUrl
+    if (!isActiveAdTile) {
+      ctx.fillStyle = isSelected ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.12)'
+      ctx.fillRect(tileLeft, tileTop, tileDisplaySize, tileDisplaySize)
+    }
+    ctx.strokeStyle = isSelected ? '#60a5fa' : isActiveAdTile ? 'rgba(74,222,128,0.9)' : 'rgba(255,255,255,0.7)'
+    ctx.lineWidth = isActiveAdTile ? 2 : 1.5
     ctx.strokeRect(tileLeft + 0.75, tileTop + 0.75, tileDisplaySize - 1.5, tileDisplaySize - 1.5)
 
     ctx.strokeStyle = 'rgba(255,255,255,0.25)'
@@ -157,14 +159,9 @@ export default function Loupe({
           <span className={`font-medium ${statusColor}`}>{statusLabel}</span>
         </div>
         <div className="text-white/30 mb-1.5">Col {col} · Row {row}</div>
-        {info?.advertiserEmail && (
-          <div className="text-white/50 truncate mb-1" title={info.advertiserEmail}>
-            {info.advertiserEmail}
-          </div>
-        )}
         {info?.destUrl && (
           <div className="text-green-400/80 truncate mb-1 text-[10px]" title={info.destUrl}>
-            {info.destUrl.replace(/^https?:\/\//, '')}
+            {(() => { try { return new URL(info.destUrl).hostname } catch { return info.destUrl.replace(/^https?:\/\//, '').split('/')[0] } })()}
           </div>
         )}
         {status === 'ACTIVE' && (tileCount > 1 || info?.displayMode) && (

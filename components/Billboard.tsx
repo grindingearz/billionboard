@@ -113,7 +113,21 @@ export default function Billboard({
             )
           }
         } else if (status) {
-          ctx.fillStyle = TILE_COLORS_BRIGHT[status]
+          if (status === 'ACTIVE') {
+            const tileData = tiles[tileId]
+            const imgState = tileData?.imageUrl
+              ? imageCache.current.get(tileData.imageUrl)
+              : undefined
+            if (imgState instanceof HTMLImageElement) {
+              ctx.fillStyle = '#0f0f0f'
+            } else if (imgState === 'loading') {
+              ctx.fillStyle = '#0b1a0b'
+            } else {
+              ctx.fillStyle = TILE_COLORS_BRIGHT.ACTIVE
+            }
+          } else {
+            ctx.fillStyle = TILE_COLORS_BRIGHT[status]
+          }
           ctx.fillRect(col * pixelSize, row * pixelSize, tileW, tileH)
         }
       }
@@ -137,23 +151,25 @@ export default function Billboard({
       }
     }
 
-    // Glow pass for ACTIVE tile clusters — single batched path for performance
+    // Glow pass for non-image active tiles (solid green fill + shadow)
     {
       ctx.save()
       ctx.shadowColor = 'rgba(74, 222, 128, 0.9)'
       ctx.shadowBlur = pixelSize * 6
       ctx.fillStyle = 'rgba(74, 222, 128, 0.15)'
       ctx.beginPath()
-      let hasActive = false
+      let hasNonImageActive = false
       for (const [tileIdStr, info] of Object.entries(tiles)) {
         if (info.status !== 'ACTIVE') continue
-        hasActive = true
+        const imgState = info.imageUrl ? imageCache.current.get(info.imageUrl) : undefined
+        if (imgState instanceof HTMLImageElement) continue
+        hasNonImageActive = true
         const tid = Number(tileIdStr)
         const c = tid % BOARD_COLUMNS
         const r = Math.floor(tid / BOARD_COLUMNS)
         ctx.rect(c * pixelSize, r * pixelSize, tileW, tileH)
       }
-      if (hasActive) ctx.fill()
+      if (hasNonImageActive) ctx.fill()
       ctx.restore()
     }
 
@@ -189,6 +205,24 @@ export default function Billboard({
       }
     }
 
+    // Glow shadow around image group bounding boxes (drawn before images)
+    for (const g of groups.values()) {
+      const cached = imageCache.current.get(g.imageUrl)
+      if (!(cached instanceof HTMLImageElement)) continue
+      ctx.save()
+      ctx.shadowColor = 'rgba(74, 222, 128, 0.55)'
+      ctx.shadowBlur = pixelSize * 5
+      ctx.strokeStyle = 'rgba(74, 222, 128, 0.25)'
+      ctx.lineWidth = 1
+      const x = g.minCol * pixelSize
+      const y = g.minRow * pixelSize
+      const w = (g.maxCol - g.minCol + 1) * pixelSize
+      const h = (g.maxRow - g.minRow + 1) * pixelSize
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
+      ctx.restore()
+    }
+
+    // Draw images
     for (const g of groups.values()) {
       const cached = imageCache.current.get(g.imageUrl)
       if (!(cached instanceof HTMLImageElement)) continue
@@ -205,6 +239,30 @@ export default function Billboard({
           ctx.drawImage(cached, col * pixelSize, row * pixelSize, tw, th)
         }
       }
+    }
+
+    // Green border outline on image groups (drawn after images)
+    for (const g of groups.values()) {
+      const cached = imageCache.current.get(g.imageUrl)
+      if (!(cached instanceof HTMLImageElement)) continue
+      const lw = Math.max(0.5, pixelSize * 0.22)
+      ctx.save()
+      ctx.strokeStyle = 'rgba(74, 222, 128, 0.75)'
+      ctx.lineWidth = lw
+      if (g.displayMode === 'STRETCH') {
+        const x = g.minCol * pixelSize
+        const y = g.minRow * pixelSize
+        const w = (g.maxCol - g.minCol + 1) * pixelSize - gap
+        const h = (g.maxRow - g.minRow + 1) * pixelSize - gap
+        ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw)
+      } else {
+        const tw = pixelSize - gap
+        const th = pixelSize - gap
+        for (const { col, row } of g.tileCoords) {
+          ctx.strokeRect(col * pixelSize + lw / 2, row * pixelSize + lw / 2, tw - lw, th - lw)
+        }
+      }
+      ctx.restore()
     }
   }, [tiles, selectedTiles, pixelSize])
 
@@ -237,26 +295,6 @@ export default function Billboard({
       img.src = url
     }
   }, [tiles])
-
-  // Dev debug: log image loading state whenever tiles or cache changes
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'production') return
-    const activeTiles = Object.values(tiles).filter((i) => i.status === 'ACTIVE')
-    const activeTilesWithImageUrl = activeTiles.filter((i) => i.imageUrl)
-    let loadedImagesCount = 0
-    let failedImagesCount = 0
-    for (const info of activeTilesWithImageUrl) {
-      const cached = imageCache.current.get(info.imageUrl!)
-      if (cached instanceof HTMLImageElement) loadedImagesCount++
-      else if (cached === 'error') failedImagesCount++
-    }
-    console.log('[billboard]', {
-      activeTilesCount: activeTiles.length,
-      activeTilesWithImageUrlCount: activeTilesWithImageUrl.length,
-      loadedImagesCount,
-      failedImagesCount,
-    })
-  }, [tiles, imageVersion])
 
   useEffect(() => {
     render()

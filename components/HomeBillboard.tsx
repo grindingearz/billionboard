@@ -15,12 +15,20 @@ interface AdGroup {
   tileIds: number[]
   centroidCol: number
   centroidRow: number
+  minCol: number
+  maxCol: number
+  minRow: number
+  maxRow: number
   info: TileInfo
 }
 
 interface HomeBillboardProps {
   tiles: TileInfoMap
   tilePrice?: number
+}
+
+function getDomain(url: string): string {
+  try { return new URL(url).hostname } catch { return url.replace(/^https?:\/\//, '').split('/')[0] }
 }
 
 function ActiveAdCard({
@@ -37,7 +45,7 @@ function ActiveAdCard({
   containerRect: DOMRect | null
 }) {
   const CARD_W = 220
-  const CARD_H = tileInfo.imageUrl ? 196 : 96
+  const CARD_H = tileInfo.imageUrl ? 196 : 110
   const OFFSET = 24
 
   let left = viewportX + OFFSET
@@ -49,9 +57,11 @@ function ActiveAdCard({
     if (top < containerRect.top + 8) top = containerRect.top + 8
   }
 
+  const domain = tileInfo.destUrl ? getDomain(tileInfo.destUrl) : null
+
   return (
     <div
-      className="pointer-events-none fixed z-50 bg-black/95 border border-green-400/30 rounded-xl overflow-hidden shadow-2xl shadow-black/60"
+      className="pointer-events-none fixed z-50 bg-black/96 border border-white/15 rounded-xl overflow-hidden shadow-2xl shadow-black/70"
       style={{ left, top, width: CARD_W }}
     >
       {tileInfo.imageUrl && (
@@ -63,22 +73,20 @@ function ActiveAdCard({
         />
       )}
       <div className="px-3 py-2.5">
-        {tileInfo.destUrl && (
-          <div
-            className="text-green-400 text-xs font-medium truncate mb-1"
-            title={tileInfo.destUrl}
-          >
-            {tileInfo.destUrl.replace(/^https?:\/\//, '')}
+        {domain && (
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0" />
+            <span className="text-white font-semibold text-xs truncate" title={domain}>
+              {domain}
+            </span>
           </div>
         )}
-        <div className="flex items-center gap-1.5 text-[10px] text-white/40 mb-1.5">
-          <span>
-            {tileCount} tile{tileCount !== 1 ? 's' : ''}
-          </span>
-          <span>·</span>
+        <div className="flex items-center gap-1.5 text-[10px] text-white/35 mb-2">
+          <span>{tileCount} tile{tileCount !== 1 ? 's' : ''}</span>
+          <span className="text-white/15">·</span>
           <span>{tileInfo.displayMode ?? 'REPEAT'}</span>
         </div>
-        <div className="text-green-400/70 text-[11px] font-medium">Click to visit →</div>
+        <div className="text-green-400/80 text-[11px] font-medium">Click to visit →</div>
       </div>
     </div>
   )
@@ -101,16 +109,22 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
 
   // Precompute active ad groups
   const adGroups = useMemo<AdGroup[]>(() => {
-    const groupMap = new Map<string, { tileIds: number[]; info: TileInfo }>()
+    const groupMap = new Map<string, { tileIds: number[]; info: TileInfo; minCol: number; maxCol: number; minRow: number; maxRow: number }>()
     for (const [tileIdStr, info] of Object.entries(tiles)) {
       if (info.status !== 'ACTIVE') continue
       const tileId = Number(tileIdStr)
+      const col = tileId % BOARD_COLUMNS
+      const row = Math.floor(tileId / BOARD_COLUMNS)
       const key = info.creativeId ?? `solo-${tileId}`
       const g = groupMap.get(key)
       if (!g) {
-        groupMap.set(key, { tileIds: [tileId], info })
+        groupMap.set(key, { tileIds: [tileId], info, minCol: col, maxCol: col, minRow: row, maxRow: row })
       } else {
         g.tileIds.push(tileId)
+        if (col < g.minCol) g.minCol = col
+        if (col > g.maxCol) g.maxCol = col
+        if (row < g.minRow) g.minRow = row
+        if (row > g.maxRow) g.maxRow = row
       }
     }
     return Array.from(groupMap.entries()).map(([key, g]) => {
@@ -121,6 +135,10 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         tileIds: g.tileIds,
         centroidCol: sumCol / g.tileIds.length,
         centroidRow: sumRow / g.tileIds.length,
+        minCol: g.minCol,
+        maxCol: g.maxCol,
+        minRow: g.minRow,
+        maxRow: g.maxRow,
         info: g.info,
       }
     })
@@ -147,7 +165,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return () => ro.disconnect()
   }, [])
 
-  // Smart initial camera: center on active ad cluster if any, otherwise fit
+  // Smart initial camera: zoom to largest ad group to fill ~20% of viewport, else fit
   useEffect(() => {
     if (initialScrollDone.current) return
     const el = boardContainerRef.current
@@ -160,22 +178,29 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         : containerSize.w || 800
 
     if (adGroups.length > 0) {
-      const allIds = adGroups.flatMap((g) => g.tileIds)
-      const avgCol = allIds.reduce((s, id) => s + (id % BOARD_COLUMNS), 0) / allIds.length
-      const avgRow =
-        allIds.reduce((s, id) => s + Math.floor(id / BOARD_COLUMNS), 0) / allIds.length
-      const newBoardW = newFitW * ZOOM_LEVELS[AD_ZOOM_IDX]
-      const newBoardH = (newFitW / aspect) * ZOOM_LEVELS[AD_ZOOM_IDX]
-      setZoomIdx(AD_ZOOM_IDX)
+      // Pick largest group by tile count
+      const largest = adGroups.reduce((best, g) => g.tileIds.length >= best.tileIds.length ? g : best)
+      const spanCols = Math.max(1, largest.maxCol - largest.minCol + 1)
+      const spanRows = Math.max(1, largest.maxRow - largest.minRow + 1)
+      // Compute zoom so the group occupies ~20% of viewport in both dimensions
+      const zColTarget = (0.20 * BOARD_COLUMNS) / spanCols
+      const zRowTarget = (0.20 * BOARD_ROWS) / spanRows
+      const zTarget = Math.min(zColTarget, zRowTarget)
+      // Find nearest zoom level, minimum 2×
+      const MIN_ZOOM_IDX = 2
+      const idealIdx = ZOOM_LEVELS.reduce(
+        (best, z, idx) => Math.abs(z - zTarget) < Math.abs(ZOOM_LEVELS[best] - zTarget) ? idx : best,
+        0
+      )
+      const zoomIdxToUse = Math.max(idealIdx, MIN_ZOOM_IDX)
+      const centerCol = (largest.minCol + largest.maxCol) / 2
+      const centerRow = (largest.minRow + largest.maxRow) / 2
+      const newBoardW = newFitW * ZOOM_LEVELS[zoomIdxToUse]
+      const newBoardH = (newFitW / aspect) * ZOOM_LEVELS[zoomIdxToUse]
+      setZoomIdx(zoomIdxToUse)
       requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(
-          0,
-          ((avgCol + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2
-        )
-        el.scrollTop = Math.max(
-          0,
-          ((avgRow + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2
-        )
+        el.scrollLeft = Math.max(0, ((centerCol + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2)
+        el.scrollTop = Math.max(0, ((centerRow + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2)
       })
     } else {
       const bW = newFitW * ZOOM_LEVELS[0]
