@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import Link from 'next/link'
 import Billboard from './Billboard'
 import Loupe from './Loupe'
 import type { TileInfoMap, TileInfo } from '@/lib/types'
@@ -357,8 +356,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return () => document.removeEventListener('mousedown', handler)
   }, [legendOpen])
 
-  const priceLabel = tilePrice > 0 ? `$${tilePrice.toFixed(2)}` : 'Free'
-
   return (
     <div className="relative w-full h-full bg-black">
       {/* Board scroll container */}
@@ -388,28 +385,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         className="absolute inset-0 z-10 pointer-events-none"
         style={{ boxShadow: 'inset 0 0 80px 20px rgba(0,0,0,0.6)' }}
       />
-
-      {/* Empty board state — shown when no active ads */}
-      {adGroups.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-          <div className="pointer-events-auto flex flex-col items-center text-center">
-            <div className="bg-black/75 border border-white/10 rounded-2xl px-8 py-6 max-w-xs shadow-2xl shadow-black/70">
-              <div className="w-6 h-6 rounded-full border border-white/20 flex items-center justify-center mx-auto mb-3">
-                <div className="w-1.5 h-1.5 rounded-full bg-white/30" />
-              </div>
-              <div className="text-white font-bold text-base mb-1">Be the first on the board.</div>
-              <div className="text-white/40 text-xs mb-1">100,000 tiles available</div>
-              <div className="text-white/25 text-xs mb-4">{priceLabel}/tile/day</div>
-              <Link
-                href="/advertise"
-                className="inline-flex items-center gap-1.5 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2 rounded-lg text-sm transition-colors"
-              >
-                Rent Tiles →
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Loupe */}
       {loupeEnabled && loupeCursor && (
