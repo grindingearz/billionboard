@@ -137,20 +137,34 @@ export default function Billboard({
       }
     }
 
-    // Draw creative images grouped by creativeId over their bounding box
-    const groups = new Map<string, { imageUrl: string; minCol: number; maxCol: number; minRow: number; maxRow: number }>()
+    // Draw creative images grouped by creativeId
+    // STRETCH: one image across bounding box; REPEAT: image per tile
+    type Group = {
+      imageUrl: string
+      displayMode: 'REPEAT' | 'STRETCH'
+      minCol: number; maxCol: number; minRow: number; maxRow: number
+      tileCoords: { col: number; row: number }[]
+    }
+    const groups = new Map<string, Group>()
     for (const [tileIdStr, info] of Object.entries(tiles)) {
       if (info.status === 'ACTIVE' && info.imageUrl && info.creativeId) {
         const tileId = Number(tileIdStr)
         const { col, row } = tileIdToCoords(tileId)
+        const mode = info.displayMode ?? 'REPEAT'
         const g = groups.get(info.creativeId)
         if (!g) {
-          groups.set(info.creativeId, { imageUrl: info.imageUrl, minCol: col, maxCol: col, minRow: row, maxRow: row })
+          groups.set(info.creativeId, {
+            imageUrl: info.imageUrl,
+            displayMode: mode,
+            minCol: col, maxCol: col, minRow: row, maxRow: row,
+            tileCoords: [{ col, row }],
+          })
         } else {
           if (col < g.minCol) g.minCol = col
           if (col > g.maxCol) g.maxCol = col
           if (row < g.minRow) g.minRow = row
           if (row > g.maxRow) g.maxRow = row
+          g.tileCoords.push({ col, row })
         }
       }
     }
@@ -158,11 +172,19 @@ export default function Billboard({
     for (const g of groups.values()) {
       const cached = imageCache.current.get(g.imageUrl)
       if (!(cached instanceof HTMLImageElement)) continue
-      const x = g.minCol * pixelSize
-      const y = g.minRow * pixelSize
-      const w = (g.maxCol - g.minCol + 1) * pixelSize
-      const h = (g.maxRow - g.minRow + 1) * pixelSize
-      ctx.drawImage(cached, x, y, w, h)
+      if (g.displayMode === 'STRETCH') {
+        const x = g.minCol * pixelSize
+        const y = g.minRow * pixelSize
+        const w = (g.maxCol - g.minCol + 1) * pixelSize
+        const h = (g.maxRow - g.minRow + 1) * pixelSize
+        ctx.drawImage(cached, x, y, w, h)
+      } else {
+        const tw = pixelSize - gap
+        const th = pixelSize - gap
+        for (const { col, row } of g.tileCoords) {
+          ctx.drawImage(cached, col * pixelSize, row * pixelSize, tw, th)
+        }
+      }
     }
   }, [tiles, selectedTiles, pixelSize])
 

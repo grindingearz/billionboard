@@ -25,7 +25,7 @@ async function getTileData(): Promise<TileInfoMap> {
         tileId: true,
         status: true,
         creativeId: true,
-        creative: { select: { imageUrl: true, destUrl: true, altText: true } },
+        creative: { select: { imageUrl: true, destUrl: true, altText: true, displayMode: true } },
         user: { select: { email: true } },
       },
     })
@@ -38,6 +38,7 @@ async function getTileData(): Promise<TileInfoMap> {
         destUrl: r.creative?.destUrl ?? undefined,
         altText: r.creative?.altText ?? undefined,
         advertiserEmail: r.user?.email ?? undefined,
+        displayMode: (r.creative?.displayMode ?? 'REPEAT') as 'REPEAT' | 'STRETCH',
       }
     }
     return tiles
@@ -66,74 +67,52 @@ export default async function HomePage() {
   const dailyRevenue = stats.activeTiles * tilePrice
 
   return (
-    <div className="min-h-screen">
-      {/* Hero */}
-      <section className="px-4 pt-16 pb-8 text-center">
-        <div className="inline-flex items-center gap-2 bg-green-400/10 border border-green-400/20 rounded-full px-3 py-1 text-xs text-green-400 font-medium mb-6">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-          LIVE — {stats.activeTiles.toLocaleString()} tiles rented
-        </div>
+    <div>
+      {/* Above-fold: compact hero strip + full-height board in one viewport */}
+      <div className="flex flex-col" style={{ height: 'calc(100vh - 56px)' }}>
 
-        <h1 className="text-4xl sm:text-6xl font-black tracking-tight text-white mb-4">
-          THE WORLD&apos;S BIGGEST
-          <br />
-          <span className="text-green-400">INTERNET BILLBOARD</span>
-        </h1>
-
-        <p className="text-white/50 text-lg max-w-xl mx-auto mb-4">
-          1,000,000,000 pixels. 100,000 tiles. {priceDisplay} per tile per day.
-          <br />
-          Revenue shared daily with $BOARD holders.
-        </p>
-
-        {freeEnabled && freeDays > 0 && (
-          <div className="inline-flex items-center gap-2 bg-amber-400/10 border border-amber-400/20 rounded-full px-4 py-1.5 text-sm text-amber-400 font-medium mb-6">
-            Launch promo: first {freeDays} day{freeDays !== 1 ? 's' : ''} free
-            {tilePrice > 0 && <span className="text-amber-400/60">· then {priceDisplay}/tile/day</span>}
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center justify-center gap-3 mb-10">
-          <Link
-            href="/advertise"
-            className="bg-green-400 hover:bg-green-300 text-black font-bold px-6 py-3 rounded-lg text-sm transition-colors"
-          >
-            Rent Tiles →
-          </Link>
-          <Link
-            href="/claim"
-            className="border border-white/20 hover:border-white/40 text-white font-medium px-6 py-3 rounded-lg text-sm transition-colors"
-          >
-            Claim Revenue
-          </Link>
-        </div>
-      </section>
-
-      {/* Billboard */}
-      <section className="mb-4">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="rounded-xl overflow-hidden border border-white/10 shadow-2xl shadow-green-400/5">
-            <HomeBillboard tiles={tiles} tilePrice={tilePrice} />
-          </div>
-          <div className="flex items-center justify-between mt-3 px-1">
-            <div className="flex gap-5 text-xs text-white/30">
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-[#141414] border border-white/10" />
-                Available
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-amber-600" />
-                Pending
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-green-700" />
-                Active
-              </span>
+        {/* Compact hero strip */}
+        <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b border-white/5">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="inline-flex items-center gap-1.5 bg-green-400/10 border border-green-400/20 rounded-full px-2.5 py-1 text-[11px] text-green-400 font-medium whitespace-nowrap">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+              LIVE — {stats.activeTiles.toLocaleString()} tiles rented
             </div>
-            <p className="text-xs text-white/20 italic">Zoom in to explore live advertiser tiles.</p>
+            <h1 className="text-lg sm:text-2xl font-black tracking-tight text-white whitespace-nowrap">
+              THE WORLD&apos;S BIGGEST{' '}
+              <span className="text-green-400">INTERNET BILLBOARD</span>
+            </h1>
+            <span className="hidden lg:block text-white/25 text-xs whitespace-nowrap">
+              1B pixels · {priceDisplay}/tile/day
+            </span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {freeEnabled && freeDays > 0 && (
+              <span className="hidden sm:flex items-center gap-1.5 bg-amber-400/10 border border-amber-400/20 rounded-full px-3 py-1 text-xs text-amber-400 whitespace-nowrap">
+                {freeDays}d free
+                {tilePrice > 0 && <span className="text-amber-400/60">· then {priceDisplay}</span>}
+              </span>
+            )}
+            <Link
+              href="/advertise"
+              className="bg-green-400 hover:bg-green-300 text-black font-bold px-4 py-1.5 rounded-lg text-sm transition-colors whitespace-nowrap"
+            >
+              Rent Tiles →
+            </Link>
+            <Link
+              href="/claim"
+              className="border border-white/20 hover:border-white/40 text-white font-medium px-4 py-1.5 rounded-lg text-sm transition-colors whitespace-nowrap"
+            >
+              Claim Revenue
+            </Link>
           </div>
         </div>
-      </section>
+
+        {/* Billboard fills all remaining viewport height */}
+        <div className="flex-1 min-h-0">
+          <HomeBillboard tiles={tiles} tilePrice={tilePrice} />
+        </div>
+      </div>
 
       {/* Stats bar */}
       <section className="border-y border-white/10 py-6 mb-16">

@@ -18,7 +18,7 @@ interface Rental {
   createdAt: string
   startDate: string | null
   dailyRate: number
-  creative: { imageUrl: string; destUrl: string; altText: string | null } | null
+  creative: { imageUrl: string; destUrl: string; altText: string | null; displayMode: string } | null
   user: { email: string | null; walletAddress: string | null }
 }
 
@@ -325,7 +325,16 @@ export default function AdminPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="text-white font-mono text-sm">Tile #{r.tileId}</div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-white font-mono text-sm">Tile #{r.tileId}</div>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                              r.creative?.displayMode === 'STRETCH'
+                                ? 'bg-blue-400/10 text-blue-400'
+                                : 'bg-white/5 text-white/30'
+                            }`}>
+                              {r.creative?.displayMode === 'STRETCH' ? 'Stretch' : 'Repeat'}
+                            </span>
+                          </div>
                           <div className="text-white/40 text-xs truncate">
                             {r.user.email ?? r.user.walletAddress ?? 'unknown'}
                           </div>

@@ -108,7 +108,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
   }, [])
 
   return (
-    <div className="relative w-full" style={{ height: 'clamp(320px, 60vh, 640px)' }}>
+    <div className="relative w-full h-full">
       <div ref={boardContainerRef} className="absolute inset-0 overflow-auto">
         <div
           className="flex items-center justify-center"
@@ -145,6 +145,25 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
           tilePrice={tilePrice}
         />
       )}
+
+      {/* Legend */}
+      <div className="absolute top-3 right-3 z-20 flex flex-col gap-1.5 bg-black/70 border border-white/10 rounded-lg px-3 py-2 text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-sm bg-white/10 border border-white/20 shrink-0" />
+          <span className="text-white/40">Available</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-sm bg-amber-400/40 border border-amber-400/30 shrink-0" />
+          <span className="text-white/40">Pending</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-sm bg-green-400/50 border border-green-400/30 shrink-0" />
+          <span className="text-white/40">Active</span>
+        </div>
+        <div className="mt-0.5 text-white/25 text-[10px] leading-tight max-w-[120px]">
+          Zoom in to explore live ad tiles.
+        </div>
+      </div>
 
       {/* Floating controls */}
       <div className="absolute bottom-3 left-3 z-20">

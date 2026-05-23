@@ -1,13 +1,13 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import Billboard from '@/components/Billboard'
 import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
-import { BOARD_COLUMNS, BOARD_ROWS } from '@/lib/types'
-import type { TileInfoMap } from '@/lib/types'
+import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection } from '@/lib/types'
+import type { TileInfoMap, DisplayMode } from '@/lib/types'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
 type Step = 'select' | 'creative' | 'review' | 'submitted'
@@ -42,9 +42,12 @@ export default function AdvertisePage() {
   const [pendingDeposit, setPendingDeposit] = useState<PendingDeposit | null>(null)
   const [copied, setCopied] = useState(false)
   const [form, setForm] = useState({ imageUrl: '', destUrl: '', altText: '' })
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('REPEAT')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [uploadError, setUploadError] = useState('')
+  const [urlError, setUrlError] = useState('')
+  const [displayModeError, setDisplayModeError] = useState('')
   const [topupError, setTopupError] = useState('')
 
   // Zoom / pan state for the tile selector
@@ -341,14 +344,17 @@ export default function AdvertisePage() {
     if (process.env.NODE_ENV === 'development') {
       console.log('[advertise] submitting imageUrl:', form.imageUrl)
     }
+    // form.destUrl holds the domain portion; compose full URL before sending
+    const fullDestUrl = `https://${form.destUrl.trim()}`
     const res = await fetch('/api/rentals', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         tileIds: Array.from(selectedTiles),
         imageUrl: form.imageUrl,
-        destUrl: form.destUrl,
+        destUrl: fullDestUrl,
         altText: form.altText,
+        displayMode,
       }),
     })
     const data = await res.json()
@@ -363,6 +369,21 @@ export default function AdvertisePage() {
 
   const cost = selectedTiles.size * tilePrice
   const canAfford = freeRental.enabled || balance !== null && balance >= cost
+
+  const blockInfo = useMemo(() => {
+    if (selectedTiles.size === 0) return null
+    const ids = Array.from(selectedTiles)
+    if (!isRectangularSelection(ids)) return null
+    let minCol = Infinity, maxCol = -Infinity, minRow = Infinity, maxRow = -Infinity
+    for (const id of ids) {
+      const { col, row } = tileIdToCoords(id)
+      if (col < minCol) minCol = col
+      if (col > maxCol) maxCol = col
+      if (row < minRow) minRow = row
+      if (row > maxRow) maxRow = row
+    }
+    return { cols: maxCol - minCol + 1, rows: maxRow - minRow + 1 }
+  }, [selectedTiles])
 
   // ── Login screen ────────────────────────────────────────────────────────────
   if (authState !== 'logged_in') {
@@ -411,7 +432,10 @@ export default function AdvertisePage() {
               setStep('select')
               setSelectedTiles(new Set())
               setForm({ imageUrl: '', destUrl: '', altText: '' })
+              setDisplayMode('REPEAT')
               setUploadError('')
+              setUrlError('')
+              setDisplayModeError('')
               setZoomIdx(0)
             }}
             className="text-green-400 hover:text-green-300 text-sm transition-colors"
@@ -759,13 +783,25 @@ export default function AdvertisePage() {
               <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
                 Destination URL
               </label>
-              <input
-                type="url"
-                value={form.destUrl}
-                onChange={(e) => setForm((f) => ({ ...f, destUrl: e.target.value }))}
-                placeholder="https://…"
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
-              />
+              <div className="flex items-stretch rounded-lg overflow-hidden border border-white/10 focus-within:border-green-400 transition-colors">
+                <span className="px-3 py-3 bg-white/3 text-white/30 text-sm flex items-center border-r border-white/10 shrink-0 select-none font-mono">
+                  https://
+                </span>
+                <input
+                  type="text"
+                  value={form.destUrl}
+                  onChange={(e) => {
+                    // Strip any protocol the user typed or pasted to prevent double-prefix
+                    const val = e.target.value.replace(/^https?:\/\//i, '').replace(/^\/\//, '')
+                    setUrlError('')
+                    setForm((f) => ({ ...f, destUrl: val }))
+                  }}
+                  placeholder="www.yourproject.com"
+                  className="flex-1 bg-white/5 px-3 py-3 text-white text-sm focus:outline-none placeholder-white/20"
+                />
+              </div>
+              <p className="text-white/30 text-xs mt-1.5">Example: www.yourproject.com</p>
+              {urlError && <p className="text-red-400 text-xs mt-1">{urlError}</p>}
             </div>
 
             <div>
@@ -781,16 +817,79 @@ export default function AdvertisePage() {
               />
             </div>
 
+            {/* Display mode selector */}
+            <div>
+              <label className="block text-xs text-white/50 uppercase tracking-widest mb-2">
+                Display Mode
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setDisplayMode('REPEAT'); setDisplayModeError('') }}
+                  className={`p-3 rounded-xl border text-left transition-colors ${
+                    displayMode === 'REPEAT'
+                      ? 'border-green-400 bg-green-400/10'
+                      : 'border-white/10 bg-white/5 hover:border-white/20'
+                  }`}
+                >
+                  <div className="text-sm font-bold text-white mb-0.5">Repeat on each tile</div>
+                  <div className="text-xs text-white/40 leading-snug">Image fills every selected tile. Best for scattered tiles, logos, and icons.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setDisplayMode('STRETCH'); setDisplayModeError('') }}
+                  className={`p-3 rounded-xl border text-left transition-colors ${
+                    displayMode === 'STRETCH'
+                      ? 'border-green-400 bg-green-400/10'
+                      : 'border-white/10 bg-white/5 hover:border-white/20'
+                  }`}
+                >
+                  <div className="text-sm font-bold text-white mb-0.5">Stretch across block</div>
+                  <div className="text-xs text-white/40 leading-snug">One image spans your entire rectangular block. Best for banners and large ads.</div>
+                </button>
+              </div>
+              {displayMode === 'STRETCH' && blockInfo && (
+                <p className="text-xs text-green-400/70 mt-2">
+                  {blockInfo.cols} × {blockInfo.rows} block — {selectedTiles.size} tiles
+                </p>
+              )}
+              {displayMode === 'STRETCH' && !blockInfo && selectedTiles.size > 0 && (
+                <p className="text-xs text-amber-400/70 mt-2">
+                  Your current selection is not a rectangle. Switch to Repeat or reselect a rectangular block.
+                </p>
+              )}
+              {displayModeError && (
+                <p className="text-xs text-red-400 mt-2">{displayModeError}</p>
+              )}
+            </div>
+
             <div className="flex gap-3">
               <button
-                onClick={() => setStep('select')}
+                onClick={() => { setUrlError(''); setDisplayModeError(''); setStep('select') }}
                 className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
               >
                 ← Back
               </button>
               <button
-                onClick={() => setStep('review')}
-                disabled={!form.imageUrl.startsWith('https://') || !form.destUrl}
+                onClick={() => {
+                  const domain = form.destUrl.trim()
+                  if (!domain) { setUrlError('Please enter a valid website URL.'); return }
+                  try {
+                    const parsed = new URL(`https://${domain}`)
+                    if (!parsed.hostname.includes('.')) throw new Error()
+                  } catch {
+                    setUrlError('Please enter a valid website URL.')
+                    return
+                  }
+                  if (displayMode === 'STRETCH' && !isRectangularSelection(Array.from(selectedTiles))) {
+                    setDisplayModeError('Stretch mode requires a rectangular block of connected tiles.')
+                    return
+                  }
+                  setUrlError('')
+                  setDisplayModeError('')
+                  setStep('review')
+                }}
+                disabled={!form.imageUrl.startsWith('https://') || !form.destUrl.trim()}
                 className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
               >
                 Review →
@@ -825,9 +924,13 @@ export default function AdvertisePage() {
                   ${balance?.toFixed(2) ?? '…'} USDC
                 </span>
               </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-white/50">Display mode</span>
+                <span className="text-white font-mono">{displayMode === 'STRETCH' ? `Stretch (${blockInfo?.cols}×${blockInfo?.rows})` : 'Repeat'}</span>
+              </div>
               <div className="border-t border-white/10 pt-3">
                 <div className="text-xs text-white/40">Destination</div>
-                <div className="text-sm text-white/70 truncate">{form.destUrl}</div>
+                <div className="text-sm text-white/70 truncate">https://{form.destUrl}</div>
               </div>
               <div>
                 <div className="text-xs text-white/40">Image</div>

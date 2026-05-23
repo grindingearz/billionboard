@@ -1,8 +1,15 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
-import { TOTAL_TILES } from '@/lib/types'
+import { TOTAL_TILES, isRectangularSelection } from '@/lib/types'
 import { getTilePrice, isFreeRentalEnabled } from '@/lib/settings'
+
+// Strips any existing protocol and ensures https:// prefix.
+// Handles: brainrush.gg → https://brainrush.gg, http://… → https://…
+function normalizeDestUrl(raw: string): string {
+  const stripped = raw.trim().replace(/^https?:\/\//i, '').replace(/^\/\//, '')
+  return `https://${stripped}`
+}
 
 export async function GET() {
   const session = await getSession()
@@ -21,7 +28,8 @@ export async function POST(req: Request) {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { tileIds, imageUrl, destUrl, altText } = await req.json()
+  const { tileIds, imageUrl, destUrl, altText, displayMode: rawDisplayMode } = await req.json()
+  const displayMode = rawDisplayMode === 'STRETCH' ? 'STRETCH' : 'REPEAT'
 
   if (!Array.isArray(tileIds) || tileIds.length === 0) {
     return NextResponse.json({ error: 'Select at least one tile' }, { status: 400 })
@@ -37,12 +45,25 @@ export async function POST(req: Request) {
   if (!destUrl || !imageUrl) {
     return NextResponse.json({ error: 'imageUrl and destUrl required' }, { status: 400 })
   }
+  if (displayMode === 'STRETCH' && !isRectangularSelection(tileIds)) {
+    return NextResponse.json(
+      { error: 'Stretch mode requires a rectangular block of connected tiles.' },
+      { status: 400 }
+    )
+  }
 
+  // Normalize destUrl: strip any existing protocol, then prepend https://
+  const normalizedDestUrl = normalizeDestUrl(destUrl)
   try {
-    new URL(destUrl)
+    const parsed = new URL(normalizedDestUrl)
+    if (!parsed.hostname.includes('.')) throw new Error()
+  } catch {
+    return NextResponse.json({ error: 'Please enter a valid website URL.' }, { status: 400 })
+  }
+  try {
     new URL(imageUrl)
   } catch {
-    return NextResponse.json({ error: 'Invalid URL format' }, { status: 400 })
+    return NextResponse.json({ error: 'Invalid image URL' }, { status: 400 })
   }
 
   // Check tiles are available
@@ -82,7 +103,7 @@ export async function POST(req: Request) {
   // Create creative + rentals in a transaction
   const result = await prisma.$transaction(async (tx) => {
     const creative = await tx.adCreative.create({
-      data: { userId: session.userId, imageUrl, destUrl, altText: altText ?? null },
+      data: { userId: session.userId, imageUrl, destUrl: normalizedDestUrl, altText: altText ?? null, displayMode },
     })
     const rentals = await Promise.all(
       tileIds.map((tileId: number) =>
