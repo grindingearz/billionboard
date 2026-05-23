@@ -87,25 +87,63 @@ export const env = {
   get adminWallet(): string | null {
     return optional('ADMIN_WALLET')
   },
-  /** Pump.fun creator fee wallet. Null until token launches. */
+  /** Pump.fun creator fee wallet. Receives trading fee inflows after $BOARD launch. */
   get feeCreatorWallet(): string | null {
     return optional('FEE_CREATOR_WALLET')
   },
+  /**
+   * Top-Up Wallet — receives advertiser USDC deposits.
+   * Falls back to AD_REVENUE_WALLET for backward compatibility.
+   * Top-ups are prepaid advertiser balances, NOT revenue.
+   */
+  get topupWallet(): string | null {
+    return optional('TOPUP_WALLET') ?? optional('AD_REVENUE_WALLET')
+  },
+  /** Legacy alias — prefer topupWallet. Kept so existing code referencing adRevenueWallet still works. */
   get adRevenueWallet(): string | null {
-    return optional('AD_REVENUE_WALLET')
+    return optional('TOPUP_WALLET') ?? optional('AD_REVENUE_WALLET')
+  },
+  /** Revenue Wallet — staging wallet for earned revenue only. Never receives raw advertiser deposits. */
+  get revenueWallet(): string | null {
+    return optional('REVENUE_WALLET')
   },
   get managementWallet(): string | null {
     return optional('MANAGEMENT_WALLET')
   },
-  /** Hot wallet for outbound USDC claim payouts. Null until payout flow is implemented. */
+  /** Distribution Wallet — receives 90% holder claim pool. */
   get distributionWallet(): string | null {
     return optional('DISTRIBUTION_WALLET')
   },
+  /** Treasury Wallet — receives 10% platform fee. */
   get treasuryWallet(): string | null {
     return optional('TREASURY_WALLET')
   },
+
+  // ── Settlement private keys (server-side only, never expose) ─────────────
   /**
-   * Private key for the distribution wallet.
+   * Private key for the Top-Up Wallet (signer for source→revenue transfer).
+   * Falls back to AD_REVENUE_WALLET_PRIVATE_KEY for backward compatibility.
+   * JSON array [1,2,…64] or base64. Never log or include in API responses.
+   */
+  get topupWalletPrivateKey(): string | null {
+    return optional('TOPUP_WALLET_PRIVATE_KEY') ?? optional('AD_REVENUE_WALLET_PRIVATE_KEY')
+  },
+  /**
+   * Private key for the Revenue Wallet (signer for revenue→treasury + distribution splits).
+   * JSON array [1,2,…64] or base64.
+   */
+  get revenueWalletPrivateKey(): string | null {
+    return optional('REVENUE_WALLET_PRIVATE_KEY')
+  },
+  /**
+   * Private key for the Fee Creator Wallet (signer for trading-fee→revenue transfer).
+   * Optional — if missing, trading fee settlement stays pending/manual.
+   */
+  get feeCreatorWalletPrivateKey(): string | null {
+    return optional('FEE_CREATOR_WALLET_PRIVATE_KEY')
+  },
+  /**
+   * Private key for the distribution wallet (payout to holders).
    * Null until the payout flow is implemented securely.
    * Never log, expose in errors, or include in API responses.
    */

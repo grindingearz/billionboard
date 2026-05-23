@@ -3,9 +3,10 @@ import { prisma } from '@/lib/prisma'
 import { getSession, walletMismatch } from '@/lib/auth'
 import { TOTAL_TILES, isRectangularSelection } from '@/lib/types'
 import { getTilePrice, isFreeRentalEnabled, isAutoApproveEnabled } from '@/lib/settings'
+import { settleRevenueEvent } from '@/lib/settlement'
+import { getOrCreateEpoch, utcDayStart } from '@/lib/epoch'
 
 // Strips any existing protocol and ensures https:// prefix.
-// Handles: brainrush.gg → https://brainrush.gg, http://… → https://…
 function normalizeDestUrl(raw: string): string {
   const stripped = raw.trim().replace(/^https?:\/\//i, '').replace(/^\/\//, '')
   return `https://${stripped}`
@@ -44,7 +45,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Invalid tileId: ${id}` }, { status: 400 })
     }
   }
-  // Deduplicate before further validation (isRectangularSelection also deduplicates internally)
   const uniqueTileIds: number[] = Array.from(new Set<number>(tileIds))
   if (!destUrl || !imageUrl) {
     return NextResponse.json({ error: 'imageUrl and destUrl required' }, { status: 400 })
@@ -56,7 +56,6 @@ export async function POST(req: Request) {
     )
   }
 
-  // Normalize destUrl: strip any existing protocol, then prepend https://
   const normalizedDestUrl = normalizeDestUrl(destUrl)
   try {
     const parsed = new URL(normalizedDestUrl)
@@ -85,32 +84,67 @@ export async function POST(req: Request) {
     )
   }
 
-  // Fetch pricing settings
-  const [tilePrice, freeEnabled, autoApprove] = await Promise.all([getTilePrice(), isFreeRentalEnabled(), isAutoApproveEnabled()])
+  const [tilePrice, freeEnabled, autoApprove] = await Promise.all([
+    getTilePrice(),
+    isFreeRentalEnabled(),
+    isAutoApproveEnabled(),
+  ])
 
   const dailyRate = freeEnabled ? 0 : tilePrice
 
-  if (!freeEnabled) {
-    // Check sufficient balance (1 day reserve); use integer cents to avoid float precision errors
+  // Prepaid 24h balance check (only when paid and auto-approved — if not auto-approved, deduct on admin approval)
+  if (!freeEnabled && autoApprove) {
     const requiredCents = Math.round(uniqueTileIds.length * tilePrice * 100)
     const wallet = await prisma.advertiserWallet.findUnique({
       where: { userId: session.userId },
     })
     const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
     if (!wallet || walletCents < requiredCents) {
+      const shortfall = Math.max(0, requiredCents - walletCents) / 100
       return NextResponse.json(
-        { error: `Insufficient balance. Need $${(requiredCents / 100).toFixed(2)} USDC` },
+        {
+          error: `Insufficient balance. Need $${(requiredCents / 100).toFixed(2)} USDC for first 24h. Shortfall: $${shortfall.toFixed(2)}`,
+          required: requiredCents / 100,
+          shortfall,
+        },
+        { status: 402 }
+      )
+    }
+  } else if (!freeEnabled && !autoApprove) {
+    // Balance check for manual-approve mode: check 1-day reserve without deducting yet
+    const requiredCents = Math.round(uniqueTileIds.length * tilePrice * 100)
+    const wallet = await prisma.advertiserWallet.findUnique({
+      where: { userId: session.userId },
+    })
+    const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+    if (!wallet || walletCents < requiredCents) {
+      const shortfall = Math.max(0, requiredCents - walletCents) / 100
+      return NextResponse.json(
+        {
+          error: `Insufficient balance. Need $${(requiredCents / 100).toFixed(2)} USDC to submit. Shortfall: $${shortfall.toFixed(2)}`,
+          required: requiredCents / 100,
+          shortfall,
+        },
         { status: 402 }
       )
     }
   }
 
-  // Create creative + rentals in a transaction
   const now = new Date()
+  const first24hCost = freeEnabled ? 0 : uniqueTileIds.length * dailyRate
+
+  // Get epoch for revenue event (only needed when auto-approving a paid ad)
+  let epochId: string | null = null
+  if (autoApprove && !freeEnabled && first24hCost > 0) {
+    const epoch = await getOrCreateEpoch(utcDayStart(now))
+    epochId = epoch.id
+  }
+
   const result = await prisma.$transaction(async (tx) => {
     const creative = await tx.adCreative.create({
       data: { userId: session.userId, imageUrl, destUrl: normalizedDestUrl, altText: altText ?? null, displayMode },
     })
+
     const rentals = await Promise.all(
       uniqueTileIds.map((tileId: number) =>
         tx.adRental.create({
@@ -120,16 +154,57 @@ export async function POST(req: Request) {
             creativeId: creative.id,
             status: autoApprove ? 'ACTIVE' : 'PENDING_APPROVAL',
             startDate: autoApprove ? now : null,
+            lastBilledAt: autoApprove ? now : null,
             nextBillingAt: autoApprove ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : null,
             dailyRate,
           },
         })
       )
     )
-    return { creative, rentals }
+
+    // Prepaid billing: deduct balance and create AD_RENT_REVENUE on activation
+    let revenueEvent = null
+    if (autoApprove && !freeEnabled && first24hCost > 0) {
+      await tx.advertiserWallet.update({
+        where: { userId: session.userId },
+        data: { usdcBalance: { decrement: first24hCost } },
+      })
+
+      revenueEvent = await tx.revenueEvent.create({
+        data: {
+          type: 'AD_RENT_REVENUE',
+          source: 'activation',
+          amount: first24hCost,
+          currency: 'USDC',
+          epochId,
+          userId: session.userId,
+          metadata: {
+            tileCount: uniqueTileIds.length,
+            creativeId: creative.id,
+            dailyRate,
+          },
+        },
+      })
+    }
+
+    return { creative, rentals, revenueEvent }
   })
 
-  return NextResponse.json({ ok: true, rentalCount: result.rentals.length, autoApproved: autoApprove }, { status: 201 })
+  // Fire-and-forget settlement (don't block the response)
+  if (result.revenueEvent) {
+    void settleRevenueEvent(result.revenueEvent.id).catch((err) =>
+      console.error('[settlement] activation error', revenueEventId(result.revenueEvent), err)
+    )
+  }
+
+  return NextResponse.json(
+    { ok: true, rentalCount: result.rentals.length, autoApproved: autoApprove },
+    { status: 201 }
+  )
+}
+
+function revenueEventId(ev: { id: string } | null) {
+  return ev?.id ?? 'unknown'
 }
 
 export async function DELETE(req: Request) {

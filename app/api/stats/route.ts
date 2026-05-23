@@ -26,6 +26,11 @@ export async function GET() {
       tilePrice,
       feePercentStr,
       currentEpoch,
+      settledTotal,
+      sentToTreasury,
+      sentToDistribution,
+      pendingSettlements,
+      failedSettlements,
     ] = await Promise.all([
       prisma.adRental.count({ where: { status: 'ACTIVE' } }),
       prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
@@ -77,6 +82,25 @@ export async function GET() {
       getTilePrice(),
       getSetting('management_fee_percent'),
       getOrCreateEpoch(today),
+      // Settlement aggregates — safe to expose totals publicly (no private keys)
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { amount: true },
+      }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { treasuryAmount: true },
+      }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { distributionAmount: true },
+      }),
+      prisma.revenueSettlement.count({
+        where: { settlementStatus: 'UNSETTLED' },
+      }),
+      prisma.revenueSettlement.count({
+        where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } },
+      }),
     ])
 
     const todayAdRevenue = Number(todayAd._sum.amount ?? 0)
@@ -86,12 +110,16 @@ export async function GET() {
     const todayMgmtFee = todayGross * (feePercent / 100)
     const todayClaimPool = todayGross - todayMgmtFee
 
+    const totalAdFees = Number(revenueAgg._sum.amount ?? 0)
+
     return NextResponse.json({
       activeTiles,
       pendingTiles,
       availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
       activeAdvertisers,
-      totalRevenue: Number(revenueAgg._sum.amount ?? 0),
+      // Renamed: "total advertising fees earned" (not "revenue" to avoid confusing with deposited balance)
+      totalRevenue: totalAdFees,
+      totalAdvertisingFees: totalAdFees,
       totalDistributed: Number(totalDistributed._sum.amount ?? 0),
       totalClaimPoolAllocated: Number(totalClaimPoolAllocated._sum.amount ?? 0),
       tilePrice,
@@ -110,6 +138,14 @@ export async function GET() {
       },
       epochs,
       recentBillingRuns,
+      // Settlement totals (public — no private wallet details)
+      settlement: {
+        totalSettled: Number(settledTotal._sum.amount ?? 0),
+        totalSentToTreasury: Number(sentToTreasury._sum.treasuryAmount ?? 0),
+        totalSentToDistribution: Number(sentToDistribution._sum.distributionAmount ?? 0),
+        pendingSettlements,
+        failedSettlements,
+      },
     })
   } catch (err) {
     return NextResponse.json(

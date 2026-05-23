@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     for (const t of transfers) {
       if (t.mint !== USDC_MINT) continue
 
-      // Route: AD_REVENUE_WALLET → topup credit flow
+      // Route: TOPUP_WALLET (AD_REVENUE_WALLET) → advertiser topup credit flow
       if (depositWallet && t.toUserAccount === depositWallet) {
         const result = await processUsdcTransfer(
           tx.signature,

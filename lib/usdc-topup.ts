@@ -20,7 +20,7 @@ export interface HeliusTransaction {
 }
 
 export function getDepositWallet(): string | null {
-  return env.adRevenueWallet
+  return env.topupWallet
 }
 
 export function parseUsdcTransfers(

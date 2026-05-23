@@ -2,9 +2,25 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { env } from '@/lib/env'
 
-/** True only when the distribution wallet private key is configured server-side. */
 function isPayoutActive(): boolean {
   return !!env.distributionWalletPrivateKey
+}
+
+/**
+ * Check if the distribution pool for an epoch has been funded.
+ * An epoch is considered funded if its settlement legs are SETTLED or the distribution tx exists.
+ * This gates whether holders can claim.
+ */
+async function isEpochDistributionFunded(epochId: string): Promise<boolean> {
+  // Check if any revenue event for this epoch has a completed distribution leg
+  const settledForEpoch = await prisma.revenueSettlement.findFirst({
+    where: {
+      revenueEvent: { epochId },
+      settlementStatus: 'SETTLED',
+      distributionTxSignature: { not: null },
+    },
+  })
+  return !!settledForEpoch
 }
 
 export async function GET(req: Request) {
@@ -15,7 +31,7 @@ export async function GET(req: Request) {
   const [snapshots, claims, excluded] = await Promise.all([
     prisma.holderSnapshot.findMany({
       where: { walletAddress: wallet },
-      include: { epoch: { select: { epochDate: true, status: true } } },
+      include: { epoch: { select: { epochDate: true, status: true, id: true } } },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.claim.findMany({
@@ -27,14 +43,24 @@ export async function GET(req: Request) {
   ])
 
   const claimedEpochIds = new Set(claims.map((c) => c.epochId))
+
+  // Only claimable when epoch is PUBLISHED and not yet claimed
   const claimable = snapshots.filter(
     (s) => s.epoch.status === 'PUBLISHED' && !claimedEpochIds.has(s.epochId)
+  )
+
+  // Annotate each claimable snapshot with distribution funding status
+  const claimableWithFunding = await Promise.all(
+    claimable.map(async (s) => ({
+      ...s,
+      distributionFunded: await isEpochDistributionFunded(s.epochId),
+    }))
   )
 
   return NextResponse.json({
     wallet,
     excluded: !!excluded,
-    claimable,
+    claimable: claimableWithFunding,
     claims,
     payoutActive: isPayoutActive(),
     tokenBalance: null,
@@ -59,6 +85,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Epoch not published' }, { status: 400 })
   }
 
+  // Gate on distribution funding
+  const funded = await isEpochDistributionFunded(epochId)
+  if (!funded) {
+    return NextResponse.json(
+      {
+        ok: false,
+        fundingPending: true,
+        message: 'Claim pool calculated. Funding pending — distribution wallet has not yet received funds for this epoch.',
+      },
+      { status: 202 }
+    )
+  }
+
   const existing = await prisma.claim.findUnique({
     where: { epochId_walletAddress: { epochId, walletAddress: wallet } },
   })
@@ -67,7 +106,6 @@ export async function POST(req: Request) {
   }
 
   if (!isPayoutActive()) {
-    // Record intent but leave in PENDING until payout is live — prevents double-claim
     const claim = await prisma.claim.create({
       data: {
         epochId,
@@ -80,12 +118,11 @@ export async function POST(req: Request) {
       ok: true,
       claim,
       payoutPending: true,
-      message: 'Claim registered. Payouts activate once the distribution wallet is configured.',
+      message: 'Claim registered. Payouts activate once the distribution wallet private key is configured.',
     })
   }
 
-  // Payout execution is not yet implemented — register as PENDING until Solana transfer is wired up.
-  // Never set status: 'CLAIMED' without a confirmed on-chain txHash.
+  // Payout execution not yet implemented — register as PENDING
   const claim = await prisma.claim.create({
     data: {
       epochId,
@@ -99,6 +136,6 @@ export async function POST(req: Request) {
     ok: true,
     claim,
     payoutPending: true,
-    message: 'Claim registered. Payout processing is pending — USDC will be sent once the transfer is executed.',
+    message: 'Claim registered. Payout processing pending — USDC will be sent once the transfer is executed.',
   })
 }

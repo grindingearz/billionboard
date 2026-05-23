@@ -2,11 +2,12 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
-import { getSetting } from '@/lib/settings'
+import { getSetting, getTilePrice, isFreeRentalEnabled } from '@/lib/settings'
 import { createRevenueEvent, getGrossRevenueForDate } from '@/lib/revenue'
 import { fetchTokenHolders } from '@/lib/helius'
-import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc } from '@/lib/epoch'
+import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc, utcDayStart } from '@/lib/epoch'
 import { verifyAndProcessSignature } from '@/lib/usdc-topup'
+import { settleRevenueEvent, dryRunSettlement } from '@/lib/settlement'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -291,6 +292,89 @@ export async function GET(req: Request) {
     })
   }
 
+  if (view === 'settlements') {
+    const statusFilter = searchParams.get('status')
+    const settlements = await prisma.revenueSettlement.findMany({
+      where: statusFilter ? { settlementStatus: statusFilter as never } : undefined,
+      include: {
+        revenueEvent: {
+          select: { type: true, amount: true, createdAt: true, userId: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    })
+    return NextResponse.json({ settlements })
+  }
+
+  if (view === 'accounting') {
+    const today = utcDayStart(new Date())
+
+    const [
+      unusedBalances,
+      earnedAdFees,
+      earnedTradingFees,
+      settledTotal,
+      failedCount,
+      pendingCount,
+      treasurySent,
+      distributionSent,
+    ] = await Promise.all([
+      prisma.advertiserWallet.aggregate({ _sum: { usdcBalance: true } }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'AD_RENT_REVENUE' },
+        _sum: { amount: true },
+      }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'TRADING_FEE_REVENUE' },
+        _sum: { amount: true },
+      }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { amount: true },
+      }),
+      prisma.revenueSettlement.count({
+        where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } },
+      }),
+      prisma.revenueSettlement.count({
+        where: { settlementStatus: 'UNSETTLED' },
+      }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { treasuryAmount: true },
+      }),
+      prisma.revenueSettlement.aggregate({
+        where: { settlementStatus: 'SETTLED' },
+        _sum: { distributionAmount: true },
+      }),
+    ])
+
+    const walletConfig = {
+      topupWallet: env.topupWallet,
+      revenueWallet: env.revenueWallet,
+      treasuryWallet: env.treasuryWallet,
+      distributionWallet: env.distributionWallet,
+      feeCreatorWallet: env.feeCreatorWallet,
+      adminWallet: env.adminWallet,
+      topupWalletKeyConfigured: !!env.topupWalletPrivateKey,
+      revenueWalletKeyConfigured: !!env.revenueWalletPrivateKey,
+      feeCreatorWalletKeyConfigured: !!env.feeCreatorWalletPrivateKey,
+    }
+
+    return NextResponse.json({
+      unusedAdvertiserBalances: Number(unusedBalances._sum.usdcBalance ?? 0),
+      earnedAdFees: Number(earnedAdFees._sum.amount ?? 0),
+      earnedTradingFees: Number(earnedTradingFees._sum.amount ?? 0),
+      totalSettled: Number(settledTotal._sum.amount ?? 0),
+      failedSettlements: failedCount,
+      pendingSettlements: pendingCount,
+      treasurySent: Number(treasurySent._sum.treasuryAmount ?? 0),
+      distributionSent: Number(distributionSent._sum.distributionAmount ?? 0),
+      walletConfig,
+      today: today.toISOString(),
+    })
+  }
+
   return NextResponse.json({ error: 'Unknown view' }, { status: 400 })
 }
 
@@ -304,15 +388,82 @@ export async function POST(req: Request) {
   if (action === 'approve_order') {
     const { creativeId } = body
     if (!creativeId) return NextResponse.json({ error: 'creativeId required' }, { status: 400 })
-    const approvedAt = new Date()
-    await prisma.adRental.updateMany({
+
+    const now = new Date()
+
+    // Load rentals and advertiser wallet for balance check
+    const rentals = await prisma.adRental.findMany({
       where: { creativeId, status: 'PENDING_APPROVAL' },
-      data: {
-        status: 'ACTIVE',
-        startDate: approvedAt,
-        nextBillingAt: new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000),
-      },
+      include: { user: { include: { advertiserWallet: true } } },
     })
+    if (rentals.length === 0) {
+      return NextResponse.json({ error: 'No pending rentals found for this creative' }, { status: 404 })
+    }
+
+    const userId = rentals[0].userId
+    const wallet = rentals[0].user.advertiserWallet
+    const [freeEnabled, tilePrice] = await Promise.all([isFreeRentalEnabled(), getTilePrice()])
+    const dailyRate = freeEnabled ? 0 : tilePrice
+    const first24hCostCents = freeEnabled ? 0 : Math.round(rentals.length * tilePrice * 100)
+    const first24hCost = first24hCostCents / 100
+
+    if (!freeEnabled && first24hCostCents > 0) {
+      const balanceCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+      if (balanceCents < first24hCostCents) {
+        const shortfall = (first24hCostCents - balanceCents) / 100
+        return NextResponse.json(
+          {
+            error: `Insufficient advertiser balance. Need $${first24hCost.toFixed(2)}, have $${Number(wallet?.usdcBalance ?? 0).toFixed(2)}. Shortfall: $${shortfall.toFixed(2)}`,
+            required: first24hCost,
+            shortfall,
+          },
+          { status: 402 }
+        )
+      }
+    }
+
+    const epoch = await getOrCreateEpoch(utcDayStart(now))
+    const rentalIds = rentals.map((r) => r.id)
+
+    const { revenueEvent } = await prisma.$transaction(async (tx) => {
+      await tx.adRental.updateMany({
+        where: { id: { in: rentalIds } },
+        data: {
+          status: 'ACTIVE',
+          startDate: now,
+          lastBilledAt: now,
+          nextBillingAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+          dailyRate,
+        },
+      })
+
+      let revenueEvent = null
+      if (!freeEnabled && first24hCost > 0) {
+        await tx.advertiserWallet.update({
+          where: { userId },
+          data: { usdcBalance: { decrement: first24hCost } },
+        })
+        revenueEvent = await tx.revenueEvent.create({
+          data: {
+            type: 'AD_RENT_REVENUE',
+            source: 'admin_approval',
+            amount: first24hCost,
+            currency: 'USDC',
+            epochId: epoch.id,
+            userId,
+            metadata: { rentalIds, creativeId, tileCount: rentals.length, dailyRate },
+          },
+        })
+      }
+      return { revenueEvent }
+    })
+
+    if (revenueEvent) {
+      void settleRevenueEvent(revenueEvent.id).catch((err) =>
+        console.error('[settlement] approve_order error', revenueEvent.id, err)
+      )
+    }
+
     return NextResponse.json({ ok: true })
   }
 
@@ -327,16 +478,89 @@ export async function POST(req: Request) {
   }
 
   if (action === 'approve_all_orders') {
-    const approvedAt = new Date()
-    const result = await prisma.adRental.updateMany({
+    // Approve all pending orders, deducting balance per user and creating revenue events
+    const now = new Date()
+    const allPending = await prisma.adRental.findMany({
       where: { status: 'PENDING_APPROVAL' },
-      data: {
-        status: 'ACTIVE',
-        startDate: approvedAt,
-        nextBillingAt: new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000),
-      },
+      include: { user: { include: { advertiserWallet: true } } },
     })
-    return NextResponse.json({ ok: true, count: result.count })
+
+    if (allPending.length === 0) return NextResponse.json({ ok: true, count: 0 })
+
+    const [freeEnabled, tilePrice] = await Promise.all([isFreeRentalEnabled(), getTilePrice()])
+    const epoch = await getOrCreateEpoch(utcDayStart(now))
+
+    // Group by userId
+    const byUser = new Map<string, typeof allPending>()
+    for (const r of allPending) {
+      const arr = byUser.get(r.userId) ?? []
+      arr.push(r)
+      byUser.set(r.userId, arr)
+    }
+
+    let totalCount = 0
+    let skippedCount = 0
+    const revenueEventIds: string[] = []
+
+    for (const [userId, rentals] of byUser) {
+      const wallet = rentals[0].user.advertiserWallet
+      const dailyRate = freeEnabled ? 0 : tilePrice
+      const first24hCostCents = freeEnabled ? 0 : Math.round(rentals.length * tilePrice * 100)
+      const first24hCost = first24hCostCents / 100
+
+      if (!freeEnabled && first24hCostCents > 0) {
+        const balanceCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+        if (balanceCents < first24hCostCents) {
+          skippedCount += rentals.length
+          continue
+        }
+      }
+
+      const rentalIds = rentals.map((r) => r.id)
+      const { revenueEvent } = await prisma.$transaction(async (tx) => {
+        await tx.adRental.updateMany({
+          where: { id: { in: rentalIds } },
+          data: {
+            status: 'ACTIVE',
+            startDate: now,
+            lastBilledAt: now,
+            nextBillingAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            dailyRate,
+          },
+        })
+        let revenueEvent = null
+        if (!freeEnabled && first24hCost > 0) {
+          await tx.advertiserWallet.update({
+            where: { userId },
+            data: { usdcBalance: { decrement: first24hCost } },
+          })
+          revenueEvent = await tx.revenueEvent.create({
+            data: {
+              type: 'AD_RENT_REVENUE',
+              source: 'admin_approval',
+              amount: first24hCost,
+              currency: 'USDC',
+              epochId: epoch.id,
+              userId,
+              metadata: { rentalIds, tileCount: rentals.length, dailyRate },
+            },
+          })
+        }
+        return { revenueEvent }
+      })
+
+      if (revenueEvent) revenueEventIds.push(revenueEvent.id)
+      totalCount += rentals.length
+    }
+
+    // Fire-and-forget settlements
+    for (const id of revenueEventIds) {
+      void settleRevenueEvent(id).catch((err) =>
+        console.error('[settlement] approve_all error', id, err)
+      )
+    }
+
+    return NextResponse.json({ ok: true, count: totalCount, skipped: skippedCount })
   }
 
   if (action === 'reject_all_orders') {
@@ -539,31 +763,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   }
 
-  if (action === 'seed_excluded_wallets') {
-    // Seed system wallets that should not receive holder distributions
-    const systemWallets = [
-      { key: 'AD_REVENUE_WALLET', label: 'Ad Revenue Wallet', reason: 'System wallet — receives ad topups' },
-      { key: 'FEE_CREATOR_WALLET', label: 'Fee Creator Wallet', reason: 'System wallet — receives trading fees' },
-      { key: 'DISTRIBUTION_WALLET', label: 'Distribution Wallet', reason: 'System wallet — pays out claims' },
-      { key: 'MANAGEMENT_WALLET', label: 'Management Wallet', reason: 'System wallet — receives management fee' },
-      { key: 'TREASURY_WALLET', label: 'Treasury Wallet', reason: 'System wallet — long-term reserve' },
-      { key: 'ADMIN_WALLET', label: 'Admin Wallet', reason: 'System wallet — admin control' },
-    ]
-
-    const created: string[] = []
-    for (const w of systemWallets) {
-      const addr = process.env[w.key]
-      if (!addr) continue
-      await prisma.excludedWallet.upsert({
-        where: { walletAddress: addr },
-        create: { walletAddress: addr, label: w.label, reason: w.reason },
-        update: { label: w.label, reason: w.reason },
-      })
-      created.push(addr)
-    }
-    return NextResponse.json({ ok: true, seeded: created.length, wallets: created })
-  }
-
   // ── Legacy create_epoch (old totalPool form) — kept for backward compat ────
 
   if (action === 'snapshot_epoch') {
@@ -751,6 +950,55 @@ export async function POST(req: Request) {
     })
 
     return NextResponse.json({ ok: true, cleared: result.count })
+  }
+
+  // ── Settlement actions ──────────────────────────────────────────────────────
+
+  if (action === 'retry_settlement') {
+    const { revenueEventId } = body
+    if (!revenueEventId) return NextResponse.json({ error: 'revenueEventId required' }, { status: 400 })
+
+    // Verify the event exists and is settleable
+    const event = await prisma.revenueEvent.findUnique({ where: { id: revenueEventId } })
+    if (!event) return NextResponse.json({ error: 'Revenue event not found' }, { status: 404 })
+
+    const result = await settleRevenueEvent(revenueEventId)
+    return NextResponse.json(result)
+  }
+
+  if (action === 'dry_run_settlement') {
+    const { revenueEventId } = body
+    if (!revenueEventId) return NextResponse.json({ error: 'revenueEventId required' }, { status: 400 })
+
+    const result = await dryRunSettlement(revenueEventId)
+    return NextResponse.json(result)
+  }
+
+  if (action === 'seed_excluded_wallets') {
+    // Also seed TOPUP_WALLET in addition to the legacy AD_REVENUE_WALLET
+    const systemWallets = [
+      { key: 'TOPUP_WALLET', label: 'Top-Up Wallet', reason: 'System wallet — receives advertiser deposits (prepaid balances)' },
+      { key: 'AD_REVENUE_WALLET', label: 'Top-Up Wallet (legacy)', reason: 'System wallet — legacy alias for Top-Up Wallet' },
+      { key: 'REVENUE_WALLET', label: 'Revenue Wallet', reason: 'System wallet — staging wallet for earned revenue' },
+      { key: 'FEE_CREATOR_WALLET', label: 'Fee Creator Wallet', reason: 'System wallet — receives trading fees' },
+      { key: 'DISTRIBUTION_WALLET', label: 'Distribution Wallet', reason: 'System wallet — pays out claims' },
+      { key: 'MANAGEMENT_WALLET', label: 'Management Wallet', reason: 'System wallet — reserved' },
+      { key: 'TREASURY_WALLET', label: 'Treasury Wallet', reason: 'System wallet — platform fee reserve' },
+      { key: 'ADMIN_WALLET', label: 'Admin Wallet', reason: 'System wallet — admin control' },
+    ]
+
+    const created: string[] = []
+    for (const w of systemWallets) {
+      const addr = process.env[w.key]
+      if (!addr) continue
+      await prisma.excludedWallet.upsert({
+        where: { walletAddress: addr },
+        create: { walletAddress: addr, label: w.label, reason: w.reason },
+        update: { label: w.label, reason: w.reason },
+      })
+      created.push(addr)
+    }
+    return NextResponse.json({ ok: true, seeded: created.length, wallets: created })
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

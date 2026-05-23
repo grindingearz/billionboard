@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution' | 'users'
+type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution' | 'users' | 'accounting' | 'settlements'
 
 interface ResetState {
   userId: string | null
@@ -132,6 +132,54 @@ interface DebugAuth {
   isAdminSession: boolean
 }
 
+interface AccountingData {
+  unusedAdvertiserBalances: number
+  earnedAdFees: number
+  earnedTradingFees: number
+  totalSettled: number
+  failedSettlements: number
+  pendingSettlements: number
+  treasurySent: number
+  distributionSent: number
+  walletConfig: {
+    topupWallet: string | null
+    revenueWallet: string | null
+    treasuryWallet: string | null
+    distributionWallet: string | null
+    feeCreatorWallet: string | null
+    adminWallet: string | null
+    topupWalletKeyConfigured: boolean
+    revenueWalletKeyConfigured: boolean
+    feeCreatorWalletKeyConfigured: boolean
+  }
+}
+
+interface SettlementRow {
+  id: string
+  revenueEventId: string
+  sourceWallet: string
+  revenueWallet: string
+  treasuryWallet: string
+  distributionWallet: string
+  amount: string
+  treasuryAmount: string
+  distributionAmount: string
+  moveToRevenueTxSignature: string | null
+  treasuryTxSignature: string | null
+  distributionTxSignature: string | null
+  settlementStatus: string
+  settlementError: string | null
+  retryCount: number
+  createdAt: string
+  settledAt: string | null
+  revenueEvent: {
+    type: string
+    amount: string
+    createdAt: string
+    userId: string | null
+  }
+}
+
 interface CurrentEpochData {
   epoch: DistributionEpoch
   liveRevenue: {
@@ -245,6 +293,9 @@ export default function AdminPage() {
     createdAt: string
   }
   const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
+  const [accountingData, setAccountingData] = useState<AccountingData | null>(null)
+  const [settlements, setSettlements] = useState<SettlementRow[]>([])
+  const [retryingSettlement, setRetryingSettlement] = useState<Record<string, boolean>>({})
 
   // Hydration guard
   useEffect(() => { setMounted(true) }, [])
@@ -352,6 +403,18 @@ export default function AdminPage() {
       if (res.ok) {
         const d = await res.json()
         setUserBalances(d.users ?? [])
+      }
+    } else if (view === 'accounting') {
+      const res = await fetch('/api/admin?view=accounting')
+      if (res.ok) {
+        const d = await res.json()
+        setAccountingData(d)
+      }
+    } else if (view === 'settlements') {
+      const res = await fetch('/api/admin?view=settlements')
+      if (res.ok) {
+        const d = await res.json()
+        setSettlements(d.settlements ?? [])
       }
     }
     setLoading(false)
@@ -766,7 +829,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['pending', 'active', 'billing', 'epochs', 'distribution', 'pricing', 'topups', 'users', 'reset'] as AdminView[]).map((v) => (
+        {(['pending', 'active', 'billing', 'accounting', 'settlements', 'epochs', 'distribution', 'pricing', 'topups', 'users', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -779,6 +842,8 @@ export default function AdminPage() {
             {v === 'pending' ? 'Pending Approval'
               : v === 'active' ? 'Active Rentals'
               : v === 'billing' ? 'Billing Runs'
+              : v === 'accounting' ? 'Accounting'
+              : v === 'settlements' ? 'Settlements'
               : v === 'epochs' ? 'Epochs (legacy)'
               : v === 'distribution' ? 'Distribution'
               : v === 'pricing' ? 'Pricing Settings'
@@ -1877,6 +1942,261 @@ export default function AdminPage() {
                           <td className="py-2 text-right text-white/30">{new Date(u.createdAt).toLocaleDateString()}</td>
                         </tr>
                       ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {view === 'accounting' && (
+            <div className="space-y-5">
+              {/* Info banner */}
+              <div className="border border-amber-500/30 bg-amber-500/5 rounded-xl px-4 py-3 text-xs text-amber-300/80">
+                <span className="font-bold text-amber-300">Accounting note:</span> Top-Up Wallet holds advertiser prepaid balances.
+                Only earned billed fees should move to Revenue Wallet. Never distribute unused advertiser deposits.
+              </div>
+
+              {!accountingData ? (
+                <p className="text-white/30 text-sm text-center py-8">Loading accounting data…</p>
+              ) : (
+                <>
+                  {/* Balance health check */}
+                  {(() => {
+                    const totalEarned = accountingData.earnedAdFees + accountingData.earnedTradingFees
+                    const unsettled = totalEarned - accountingData.totalSettled
+                    const minRequired = accountingData.unusedAdvertiserBalances + Math.max(0, unsettled)
+                    const isHealthy = true // on-chain balance unknown without RPC; show warning only on data anomalies
+                    const hasFailures = accountingData.failedSettlements > 0
+                    return hasFailures ? (
+                      <div className="border border-red-500/40 bg-red-500/5 rounded-xl px-4 py-3 text-xs text-red-300">
+                        <span className="font-bold">Settlement warning:</span> {accountingData.failedSettlements} failed/partial settlement{accountingData.failedSettlements !== 1 ? 's' : ''}. Check the Settlements tab to retry.
+                        <br /><span className="text-red-300/60 mt-1 block">Note: the active ad and advertiser balance deduction are preserved. Only the on-chain transfer failed.</span>
+                      </div>
+                    ) : null
+                  })()}
+
+                  {/* Main accounting cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[
+                      {
+                        label: 'Unused Advertiser Balances',
+                        value: `$${accountingData.unusedAdvertiserBalances.toFixed(2)}`,
+                        sub: 'Prepaid deposits not yet billed',
+                        color: 'text-amber-400',
+                      },
+                      {
+                        label: 'Earned Advertising Fees',
+                        value: `$${accountingData.earnedAdFees.toFixed(2)}`,
+                        sub: 'AD_RENT_REVENUE events (billed)',
+                        color: 'text-green-400',
+                      },
+                      {
+                        label: 'Trading Fees Earned',
+                        value: `$${accountingData.earnedTradingFees.toFixed(2)}`,
+                        sub: 'TRADING_FEE_REVENUE events',
+                        color: 'text-blue-400',
+                      },
+                      {
+                        label: 'Total Settled (on-chain)',
+                        value: `$${accountingData.totalSettled.toFixed(2)}`,
+                        sub: 'SETTLED settlements',
+                        color: 'text-green-400',
+                      },
+                      {
+                        label: 'Treasury Fees Sent',
+                        value: `$${accountingData.treasurySent.toFixed(2)}`,
+                        sub: 'To TREASURY_WALLET',
+                        color: 'text-white/70',
+                      },
+                      {
+                        label: 'Distribution Sent',
+                        value: `$${accountingData.distributionSent.toFixed(2)}`,
+                        sub: 'To DISTRIBUTION_WALLET',
+                        color: 'text-white/70',
+                      },
+                      {
+                        label: 'Pending Settlements',
+                        value: String(accountingData.pendingSettlements),
+                        sub: 'UNSETTLED events',
+                        color: accountingData.pendingSettlements > 0 ? 'text-amber-400' : 'text-white/30',
+                      },
+                      {
+                        label: 'Failed Settlements',
+                        value: String(accountingData.failedSettlements),
+                        sub: 'FAILED / PARTIAL',
+                        color: accountingData.failedSettlements > 0 ? 'text-red-400' : 'text-white/30',
+                      },
+                    ].map(({ label, value, sub, color }) => (
+                      <div key={label} className="border border-white/10 rounded-xl p-3 bg-white/2 space-y-0.5">
+                        <div className={`font-mono font-bold text-lg ${color}`}>{value}</div>
+                        <div className="text-white/70 text-xs font-medium">{label}</div>
+                        <div className="text-white/25 text-[10px]">{sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Wallet config status */}
+                  <div className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                    <h3 className="text-xs font-bold text-white/50 uppercase tracking-widest">Wallet Configuration</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {[
+                        { label: 'Top-Up Wallet', addr: accountingData.walletConfig.topupWallet, keyOk: accountingData.walletConfig.topupWalletKeyConfigured },
+                        { label: 'Revenue Wallet', addr: accountingData.walletConfig.revenueWallet, keyOk: accountingData.walletConfig.revenueWalletKeyConfigured },
+                        { label: 'Fee Creator Wallet', addr: accountingData.walletConfig.feeCreatorWallet, keyOk: accountingData.walletConfig.feeCreatorWalletKeyConfigured },
+                        { label: 'Treasury Wallet', addr: accountingData.walletConfig.treasuryWallet, keyOk: null },
+                        { label: 'Distribution Wallet', addr: accountingData.walletConfig.distributionWallet, keyOk: null },
+                        { label: 'Admin Wallet', addr: accountingData.walletConfig.adminWallet, keyOk: null },
+                      ].map(({ label, addr, keyOk }) => (
+                        <div key={label} className="flex items-center justify-between gap-2 bg-white/3 rounded px-3 py-1.5">
+                          <span className="text-white/50">{label}</span>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {keyOk !== null && (
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${keyOk ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                                {keyOk ? 'key ✓' : 'no key'}
+                              </span>
+                            )}
+                            <span className={`font-mono text-[10px] ${addr ? 'text-white/60' : 'text-red-400/60'}`}>
+                              {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : 'not set'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {(!accountingData.walletConfig.topupWalletKeyConfigured || !accountingData.walletConfig.revenueWalletKeyConfigured) && (
+                      <p className="text-amber-400/60 text-[10px]">
+                        Settlement private keys not configured — automated on-chain transfers are disabled.
+                        Revenue events are tracked; set TOPUP_WALLET_PRIVATE_KEY and REVENUE_WALLET_PRIVATE_KEY to enable.
+                      </p>
+                    )}
+                  </div>
+
+                  <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-4 py-2 rounded transition-colors">
+                    Refresh
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {view === 'settlements' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-white/40">
+                  One settlement record per revenue event. Retry sends only missing legs.
+                </p>
+                <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-3 py-1.5 rounded transition-colors">
+                  Refresh
+                </button>
+              </div>
+
+              {settlements.length === 0 ? (
+                <p className="text-white/30 text-sm text-center py-12">No settlement records yet. They are created when ads are billed or activated.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Date</th>
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Type</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Amount</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Treasury</th>
+                        <th className="pb-2 text-right font-medium pr-3 whitespace-nowrap">Distribution</th>
+                        <th className="pb-2 text-center font-medium pr-3 whitespace-nowrap">Status</th>
+                        <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Txs</th>
+                        <th className="pb-2 text-left font-medium whitespace-nowrap">Error / Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {settlements.map((s) => {
+                        const statusColor =
+                          s.settlementStatus === 'SETTLED' ? 'text-green-400 bg-green-400/10'
+                          : s.settlementStatus === 'FAILED' ? 'text-red-400 bg-red-400/10'
+                          : s.settlementStatus === 'PARTIAL' ? 'text-amber-400 bg-amber-400/10'
+                          : s.settlementStatus === 'UNSETTLED' ? 'text-white/40 bg-white/5'
+                          : 'text-blue-400 bg-blue-400/10'
+                        const canRetry = ['FAILED', 'PARTIAL', 'UNSETTLED'].includes(s.settlementStatus)
+                        return (
+                          <tr key={s.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
+                            <td className="py-2 pr-3 text-white/50 whitespace-nowrap">
+                              {new Date(s.createdAt).toLocaleDateString()}
+                            </td>
+                            <td className="py-2 pr-3">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium ${
+                                s.revenueEvent.type === 'AD_RENT_REVENUE' ? 'text-green-400 bg-green-400/10' : 'text-blue-400 bg-blue-400/10'
+                              }`}>
+                                {s.revenueEvent.type === 'AD_RENT_REVENUE' ? 'AD_RENT' : 'TRADING_FEE'}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-3 text-right font-mono font-bold text-white">
+                              ${Number(s.amount).toFixed(4)}
+                            </td>
+                            <td className="py-2 pr-3 text-right font-mono text-white/50">
+                              ${Number(s.treasuryAmount).toFixed(4)}
+                            </td>
+                            <td className="py-2 pr-3 text-right font-mono text-white/50">
+                              ${Number(s.distributionAmount).toFixed(4)}
+                            </td>
+                            <td className="py-2 pr-3 text-center">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${statusColor}`}>
+                                {s.settlementStatus}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-3">
+                              <div className="flex flex-col gap-0.5">
+                                {s.moveToRevenueTxSignature && (
+                                  <a href={`https://solscan.io/tx/${s.moveToRevenueTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">rev ↗</a>
+                                )}
+                                {s.treasuryTxSignature && (
+                                  <a href={`https://solscan.io/tx/${s.treasuryTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">treas ↗</a>
+                                )}
+                                {s.distributionTxSignature && (
+                                  <a href={`https://solscan.io/tx/${s.distributionTxSignature}`} target="_blank" rel="noopener noreferrer"
+                                    className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono">dist ↗</a>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2">
+                              <div className="flex flex-col gap-1 min-w-0">
+                                {s.settlementError && (
+                                  <div className="text-[10px] text-red-400/70 max-w-xs truncate" title={s.settlementError}>
+                                    {s.settlementError}
+                                  </div>
+                                )}
+                                {canRetry && (
+                                  <button
+                                    disabled={!!retryingSettlement[s.id]}
+                                    onClick={async () => {
+                                      setRetryingSettlement((r) => ({ ...r, [s.id]: true }))
+                                      try {
+                                        const res = await fetch('/api/admin', {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ action: 'retry_settlement', revenueEventId: s.revenueEventId }),
+                                        })
+                                        const d = await res.json()
+                                        setActionMsg(d.ok ? `Settlement ${d.status}` : `Error: ${d.error}`)
+                                        setTimeout(() => setActionMsg(''), 4000)
+                                        load()
+                                      } finally {
+                                        setRetryingSettlement((r) => ({ ...r, [s.id]: false }))
+                                      }
+                                    }}
+                                    className="text-[10px] bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-2 py-0.5 rounded transition-colors disabled:opacity-50 w-fit"
+                                  >
+                                    {retryingSettlement[s.id] ? 'Retrying…' : 'Retry'}
+                                  </button>
+                                )}
+                                {s.retryCount > 0 && (
+                                  <div className="text-[10px] text-white/20">Retried {s.retryCount}×</div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
