@@ -5,25 +5,23 @@ import { TOTAL_TILES } from '@/lib/types'
 import type { TileInfoMap } from '@/lib/types'
 import { getAllSettings } from '@/lib/settings'
 
+export const dynamic = 'force-dynamic'
+
 async function getStats() {
   try {
-    const [activeTiles, pendingTiles] = await Promise.all([
-      prisma.adRental.count({ where: { status: 'ACTIVE' } }),
-      prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
-    ])
-    return { activeTiles, pendingTiles, availableTiles: TOTAL_TILES - activeTiles - pendingTiles }
+    const activeTiles = await prisma.adRental.count({ where: { status: 'ACTIVE' } })
+    return { activeTiles, availableTiles: TOTAL_TILES - activeTiles }
   } catch {
-    return { activeTiles: 0, pendingTiles: 0, availableTiles: TOTAL_TILES }
+    return { activeTiles: 0, availableTiles: TOTAL_TILES }
   }
 }
 
 async function getTileData(): Promise<TileInfoMap> {
   try {
     const rentals = await prisma.adRental.findMany({
-      where: { status: { in: ['PENDING_APPROVAL', 'ACTIVE'] } },
+      where: { status: 'ACTIVE' },
       select: {
         tileId: true,
-        status: true,
         creativeId: true,
         creative: { select: { imageUrl: true, destUrl: true, altText: true, displayMode: true } },
       },
@@ -31,7 +29,7 @@ async function getTileData(): Promise<TileInfoMap> {
     const tiles: TileInfoMap = {}
     for (const r of rentals) {
       tiles[r.tileId] = {
-        status: r.status === 'ACTIVE' ? 'ACTIVE' : 'PENDING',
+        status: 'ACTIVE',
         creativeId: r.creativeId ?? undefined,
         imageUrl: r.creative?.imageUrl ?? undefined,
         destUrl: r.creative?.destUrl ?? undefined,
@@ -147,7 +145,7 @@ export default async function HomePage() {
             {
               n: '02',
               title: 'Get approved',
-              body: 'Our team reviews your ad. Once approved it goes live on the billboard.',
+              body: 'Your ad goes live immediately. Billing starts the day it runs — balance is deducted daily.',
             },
             {
               n: '03',

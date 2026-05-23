@@ -5,6 +5,7 @@ export const SETTING_DEFAULTS = {
   free_rental_enabled: 'false',
   free_rental_days: '0',
   management_fee_percent: '10',
+  auto_approve_ads: 'true',
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
@@ -39,6 +40,10 @@ export async function getTilePrice(): Promise<number> {
 
 export async function isFreeRentalEnabled(): Promise<boolean> {
   return (await getSetting('free_rental_enabled')) === 'true'
+}
+
+export async function isAutoApproveEnabled(): Promise<boolean> {
+  return (await getSetting('auto_approve_ads')) !== 'false'
 }
 
 export async function getFreeRentalDays(): Promise<number> {

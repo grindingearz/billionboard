@@ -6,7 +6,7 @@ import { getSetting } from '@/lib/settings'
 import { createRevenueEvent, getGrossRevenueForDate } from '@/lib/revenue'
 import { fetchTokenHolders } from '@/lib/helius'
 import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterdayUtc } from '@/lib/epoch'
-import { processUsdcTransfer, USDC_MINT, getDepositWallet } from '@/lib/usdc-topup'
+import { verifyAndProcessSignature } from '@/lib/usdc-topup'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -87,7 +87,8 @@ export async function GET(req: Request) {
   }
 
   if (view === 'active') {
-    const rentals = await prisma.adRental.findMany({
+    const BOARD_COLS = 400
+    const allRentals = await prisma.adRental.findMany({
       where: { status: 'ACTIVE' },
       include: {
         creative: true,
@@ -95,7 +96,59 @@ export async function GET(req: Request) {
       },
       orderBy: { startDate: 'desc' },
     })
-    return NextResponse.json({ rentals })
+
+    type ActiveOrderAcc = {
+      creativeId: string | null
+      userId: string
+      tileIds: number[]
+      rentalIds: string[]
+      status: string
+      createdAt: Date
+      startDate: Date | null
+      dailyRateTotal: number
+      creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
+      user: { email: string | null; walletAddress: string | null }
+    }
+
+    const orderMap = new Map<string, ActiveOrderAcc>()
+    for (const rental of allRentals) {
+      const key = rental.creativeId ?? `solo-${rental.id}`
+      if (!orderMap.has(key)) {
+        orderMap.set(key, {
+          creativeId: rental.creativeId,
+          userId: rental.userId,
+          tileIds: [],
+          rentalIds: [],
+          status: rental.status,
+          createdAt: rental.createdAt,
+          startDate: rental.startDate,
+          dailyRateTotal: 0,
+          creative: rental.creative
+            ? { imageUrl: rental.creative.imageUrl, destUrl: rental.creative.destUrl,
+                altText: rental.creative.altText, displayMode: rental.creative.displayMode }
+            : null,
+          user: { email: rental.user.email ?? null, walletAddress: rental.user.walletAddress ?? null },
+        })
+      }
+      const o = orderMap.get(key)!
+      o.tileIds.push(rental.tileId)
+      o.rentalIds.push(rental.id)
+      o.dailyRateTotal += Number(rental.dailyRate)
+    }
+
+    const orders = Array.from(orderMap.values()).map((o) => {
+      let blockCols: number | undefined
+      let blockRows: number | undefined
+      if (o.creative?.displayMode === 'STRETCH' && o.tileIds.length > 1) {
+        const cs = o.tileIds.map((id) => id % BOARD_COLS)
+        const rs = o.tileIds.map((id) => Math.floor(id / BOARD_COLS))
+        blockCols = Math.max(...cs) - Math.min(...cs) + 1
+        blockRows = Math.max(...rs) - Math.min(...rs) + 1
+      }
+      return { ...o, tileCount: o.tileIds.length, blockCols, blockRows }
+    })
+
+    return NextResponse.json({ orders })
   }
 
   if (view === 'epochs') {
@@ -251,6 +304,16 @@ export async function POST(req: Request) {
       data: { status: 'REJECTED' },
     })
     return NextResponse.json({ ok: true, count: result.count })
+  }
+
+  if (action === 'remove_order') {
+    const { creativeId } = body
+    if (!creativeId) return NextResponse.json({ error: 'creativeId required' }, { status: 400 })
+    await prisma.adRental.updateMany({
+      where: { creativeId, status: 'ACTIVE' },
+      data: { status: 'REJECTED', endDate: new Date() },
+    })
+    return NextResponse.json({ ok: true })
   }
 
   if (action === 'expire') {
@@ -552,70 +615,44 @@ export async function POST(req: Request) {
     const { signature } = body
     if (!signature?.trim()) return NextResponse.json({ error: 'signature required' }, { status: 400 })
 
-    const heliusApiKey = env.heliusApiKey
-    const depositWallet = getDepositWallet()
-    const usdcMint = process.env.NEXT_PUBLIC_USDC_MINT?.trim() || USDC_MINT
-
-    if (!heliusApiKey || !depositWallet) {
-      return NextResponse.json({ error: 'HELIUS_API_KEY or AD_REVENUE_WALLET not configured' }, { status: 503 })
+    const result = await verifyAndProcessSignature(signature.trim())
+    if (!result.ok) {
+      if ('found' in result) return NextResponse.json({ ok: false, found: false, message: result.message })
+      return NextResponse.json({ ok: false, error: result.error }, { status: 502 })
     }
-
-    const heliusUrl = `https://api.helius.xyz/v0/transactions?api-key=${heliusApiKey}`
-    const resp = await fetch(heliusUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transactions: [signature.trim()] }),
-    })
-
-    if (!resp.ok) {
-      return NextResponse.json({ ok: false, error: `Helius error: HTTP ${resp.status}` }, { status: 502 })
-    }
-
-    const txs = await resp.json()
-    if (!Array.isArray(txs) || txs.length === 0) {
-      return NextResponse.json({ ok: false, found: false, message: 'Transaction not found on Helius' })
-    }
-
-    const tx = txs[0] as {
-      signature: string
-      tokenTransfers?: Array<{ mint: string; toUserAccount: string; fromUserAccount: string; tokenAmount: number }>
-    }
-    const transfers = (tx.tokenTransfers ?? []).filter(
-      (t) => t.mint === usdcMint && t.toUserAccount === depositWallet
-    )
-
-    if (transfers.length === 0) {
-      return NextResponse.json({
-        ok: false,
-        found: false,
-        message: 'No USDC transfer to deposit wallet found in this transaction',
-        debug: { tokenTransfers: tx.tokenTransfers ?? [], depositWallet, usdcMint },
-      })
-    }
-
-    const results = []
-    for (const t of transfers) {
-      const result = await processUsdcTransfer(
-        tx.signature, t.fromUserAccount, t.toUserAccount, t.tokenAmount, 'reconcile', JSON.stringify(tx)
-      )
-      results.push({ ...result, amount: t.tokenAmount, sender: t.fromUserAccount })
-    }
-
-    return NextResponse.json({ ok: true, found: true, results })
+    return NextResponse.json({ ok: true, found: true, results: result.results })
   }
 
   if (action === 'reconcile') {
-    const res = await fetch(
-      `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/cron/reconcile-usdc-topups`,
-      {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+    let res: Response
+    try {
+      res = await fetch(`${appUrl}/api/cron/reconcile-usdc-topups`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.CRON_SECRET ?? ''}`,
-        },
-      }
-    )
-    const d = await res.json()
-    return NextResponse.json(d)
+        headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? ''}` },
+      })
+    } catch (fetchErr) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
+      return NextResponse.json(
+        { ok: false, error: `Network error reaching cron endpoint: ${msg}`, appUrl },
+        { status: 502 }
+      )
+    }
+    const text = await res.text()
+    if (!res.ok) {
+      return NextResponse.json(
+        { ok: false, error: `Cron endpoint returned HTTP ${res.status}`, body: text.slice(0, 300) },
+        { status: 502 }
+      )
+    }
+    try {
+      return NextResponse.json(JSON.parse(text))
+    } catch {
+      return NextResponse.json(
+        { ok: false, error: 'Cron endpoint returned non-JSON', body: text.slice(0, 300) },
+        { status: 502 }
+      )
+    }
   }
 
   // ── Test / dev tooling ──────────────────────────────────────────────────────

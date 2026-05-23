@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { Prisma } from '@/app/generated/prisma/client'
 import { getSession } from '@/lib/auth'
-import { getDepositWallet, TOPUP_EXPIRY_HOURS } from '@/lib/usdc-topup'
+import { getDepositWallet, TOPUP_EXPIRY_HOURS, verifyAndProcessSignature } from '@/lib/usdc-topup'
 
 export async function POST(req: Request) {
   const session = await getSession()
@@ -124,6 +124,12 @@ export async function PATCH(req: Request) {
     console.error('[PATCH /api/topup] unexpected error:', e)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
+
+  // Attempt immediate Helius verification — fire-and-forget so PATCH returns fast.
+  // If the tx is already confirmed on-chain, balance is credited before the next poll.
+  verifyAndProcessSignature(txSignature).catch((e) =>
+    console.error('[PATCH /api/topup] background verify failed:', e)
+  )
 
   return NextResponse.json({ ok: true })
 }

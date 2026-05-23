@@ -77,7 +77,11 @@ export async function POST(req: Request) {
     const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)
     const balance = Number(wallet.usdcBalance)
 
-    if (charge > 0 && balance < charge) {
+    // Use integer cents to avoid float precision issues (e.g. 6 * 1.05 == 6.300000000000001)
+    const chargeCents = rentals.reduce((sum, r) => sum + Math.round(Number(r.dailyRate) * 100), 0)
+    const balanceCents = Math.round(balance * 100)
+
+    if (chargeCents > 0 && balanceCents < chargeCents) {
       // Insufficient funds — expire all active rentals for this user
       for (const r of rentals) {
         expired.push(r.id)
@@ -112,9 +116,9 @@ export async function POST(req: Request) {
     // Deduct balances (sum of dailyRates per user)
     ...Array.from(byUser.entries())
       .filter(([, rentals]) => {
-        const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)
-        const balance = Number(rentals[0].user.advertiserWallet?.usdcBalance ?? 0)
-        return charge === 0 || balance >= charge
+        const chargeCents = rentals.reduce((sum, r) => sum + Math.round(Number(r.dailyRate) * 100), 0)
+        const balanceCents = Math.round(Number(rentals[0].user.advertiserWallet?.usdcBalance ?? 0) * 100)
+        return chargeCents === 0 || balanceCents >= chargeCents
       })
       .map(([userId, rentals]) => {
         const charge = rentals.reduce((sum, r) => sum + Number(r.dailyRate), 0)

@@ -135,3 +135,52 @@ export function runRectangularSelectionTests(): void {
   }
   console.log(`[isRectangularSelection] ${passed}/${cases.length} tests passed`)
 }
+
+/**
+ * Convert a USDC dollar amount to integer cents, rounding to the nearest cent.
+ * Use this for all balance comparisons to avoid IEEE 754 float precision errors
+ * (e.g. 6 * 1.05 === 6.300000000000001 in JS, which would cause 6.30 >= 6.30 to be false).
+ */
+export const toCents = (usdcAmount: number): number => Math.round(usdcAmount * 100)
+
+/**
+ * Returns true if balance covers the required amount, using cents to avoid float precision errors.
+ * Exact equality is allowed: balance === required → true.
+ */
+export const canAffordCents = (balance: number, required: number): boolean =>
+  toCents(balance) >= toCents(required)
+
+/**
+ * Returns the shortfall in cents (0 if balance is sufficient).
+ * Use (shortfallCents / 100).toFixed(2) to display.
+ */
+export const shortfallCents = (balance: number, required: number): number =>
+  Math.max(0, toCents(required) - toCents(balance))
+
+export function runBalancePrecisionTests(): void {
+  if (process.env.NODE_ENV === 'production') return
+
+  const cases: [string, number, number, boolean, number][] = [
+    ['exact match',              6.30, 6.30, true,  0],
+    ['slightly short',           6.29, 6.30, false, 1],
+    ['slightly over',            6.31, 6.30, true,  0],
+    ['exact small',              0.10, 0.10, true,  0],
+    ['one cent short',           0.09, 0.10, false, 1],
+    ['classic float trap 0.1+0.2', 0.1 + 0.2, 0.30, true, 0],
+    ['6*1.05 vs 6.30',           6 * 1.05, 6.30, true, 0],
+    ['zero balance zero cost',   0,    0,    true,  0],
+    ['large exact',              100,  100,  true,  0],
+  ]
+
+  let passed = 0
+  for (const [name, balance, required, expectedAfford, expectedShortfallCents] of cases) {
+    const afford = canAffordCents(balance, required)
+    const sf = shortfallCents(balance, required)
+    const ok = afford === expectedAfford && sf === expectedShortfallCents
+    if (ok) passed++
+    console[ok ? 'log' : 'warn'](
+      `[balance-precision] ${ok ? '✓' : '✗'} ${name}: balance=${balance}, required=${required}, afford=${afford}(exp ${expectedAfford}), shortfall=${sf}c(exp ${expectedShortfallCents}c)`
+    )
+  }
+  console.log(`[balance-precision] ${passed}/${cases.length} tests passed`)
+}

@@ -20,17 +20,7 @@ interface PricingSettings {
   free_rental_enabled: string
   free_rental_days: string
   management_fee_percent: string
-}
-
-interface Rental {
-  id: string
-  tileId: number
-  status: string
-  createdAt: string
-  startDate: string | null
-  dailyRate: number
-  creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
-  user: { email: string | null; walletAddress: string | null }
+  auto_approve_ads: string
 }
 
 interface RentalOrder {
@@ -41,6 +31,7 @@ interface RentalOrder {
   tileCount: number
   status: string
   createdAt: string
+  startDate: string | null
   dailyRateTotal: number
   creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
   user: { email: string | null; walletAddress: string | null }
@@ -193,7 +184,7 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState('')
   const [debugAuth, setDebugAuth] = useState<DebugAuth | null>(null)
   const [view, setView] = useState<AdminView>('pending')
-  const [rentals, setRentals] = useState<Rental[]>([])
+  const [rentals, setRentals] = useState<RentalOrder[]>([])
   const [pendingOrders, setPendingOrders] = useState<RentalOrder[]>([])
   const [approveAllConfirm, setApproveAllConfirm] = useState(false)
   const [rejectAllConfirm, setRejectAllConfirm] = useState(false)
@@ -221,6 +212,7 @@ export default function AdminPage() {
     free_rental_enabled: 'false',
     free_rental_days: '0',
     management_fee_percent: '10',
+    auto_approve_ads: 'true',
   }
   const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
   const [pricingSaving, setPricingSaving] = useState(false)
@@ -301,7 +293,7 @@ export default function AdminPage() {
       const res = await fetch('/api/admin?view=active')
       if (res.ok) {
         const d = await res.json()
-        setRentals(d.rentals ?? [])
+        setRentals(d.orders ?? [])
       }
     } else if (view === 'billing') {
       const res = await fetch('/api/admin?view=billing')
@@ -573,22 +565,32 @@ export default function AdminPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reconcile' }),
       })
-      const d = await res.json()
+      let d: ReconcileResult
+      try {
+        d = await res.json()
+      } catch {
+        d = {
+          ok: false, scannedTransactions: 0, usdcTransfersFound: 0, matchedTopups: 0,
+          unmatchedDeposits: 0, duplicatesIgnored: 0, expiredTopups: 0,
+          errors: [`Server returned HTTP ${res.status} with non-JSON body`], details: [],
+        }
+      }
       setReconcileResult(d)
-      if (res.ok) load()
-    } catch {
+      if (res.ok && d.ok) load()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
       setReconcileResult({
         ok: false, scannedTransactions: 0, usdcTransfersFound: 0, matchedTopups: 0,
         unmatchedDeposits: 0, duplicatesIgnored: 0, expiredTopups: 0,
-        errors: ['Network error — check console'], details: [],
+        errors: [`Request failed: ${msg}`], details: [],
       })
     } finally {
       setReconcileRunning(false)
     }
   }
 
-  const checkTxSig = async (topupId: string) => {
-    const sig = txSigInputs[topupId]?.trim()
+  const checkTxSig = async (topupId: string, overrideSig?: string) => {
+    const sig = (overrideSig ?? txSigInputs[topupId])?.trim()
     if (!sig) return
     setTxSigRunning((r) => ({ ...r, [topupId]: true }))
     try {
@@ -955,18 +957,22 @@ export default function AdminPage() {
               {rentals.length === 0 ? (
                 <div className="text-white/30 text-sm text-center py-12">No active rentals.</div>
               ) : (
-                rentals.map((r) => (
-                  <div key={r.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4">
-                    <div className="flex-shrink-0 flex flex-col items-center gap-1">
-                      {r.creative?.imageUrl ? (
+                rentals.map((order) => (
+                  <div
+                    key={order.creativeId ?? order.rentalIds[0]}
+                    className="border border-white/10 rounded-xl p-4 bg-white/2 flex gap-4"
+                  >
+                    {/* Image preview */}
+                    <div className="flex-shrink-0 flex flex-col items-center gap-1.5">
+                      {order.creative?.imageUrl ? (
                         /* eslint-disable-next-line @next/next/no-img-element */
                         <img
-                          src={r.creative.imageUrl}
-                          alt={r.creative.altText ?? 'Ad'}
-                          className="w-20 h-20 object-cover rounded border border-white/10"
+                          src={order.creative.imageUrl}
+                          alt={order.creative.altText ?? 'Ad'}
+                          className="w-24 h-24 object-cover rounded border border-white/10"
                         />
                       ) : (
-                        <div className="w-20 h-20 rounded border border-white/10 bg-white/5 flex items-center justify-center">
+                        <div className="w-24 h-24 rounded border border-white/10 bg-white/5 flex items-center justify-center">
                           <span className="text-white/20 text-[10px]">no image</span>
                         </div>
                       )}
@@ -974,62 +980,71 @@ export default function AdminPage() {
                         LIVE
                       </span>
                     </div>
+
+                    {/* Order details */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <div className="text-white font-mono text-sm">Tile #{r.tileId}</div>
+                          <div className="flex items-center gap-2 flex-wrap mb-1">
+                            <span className="text-white font-bold text-sm">
+                              {order.tileCount} tile{order.tileCount !== 1 ? 's' : ''}
+                            </span>
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                              r.creative?.displayMode === 'STRETCH'
+                              order.creative?.displayMode === 'STRETCH'
                                 ? 'bg-blue-400/10 text-blue-400'
                                 : 'bg-white/5 text-white/30'
                             }`}>
-                              {r.creative?.displayMode === 'STRETCH' ? 'Stretch' : 'Repeat'}
+                              {order.creative?.displayMode === 'STRETCH'
+                                ? `Stretch ${order.blockCols}×${order.blockRows}`
+                                : 'Repeat'}
+                            </span>
+                            <span className="text-white/30 text-[10px] font-mono">
+                              ${order.dailyRateTotal.toFixed(2)}/day
                             </span>
                           </div>
-                          {r.user.walletAddress ? (
-                            <div className="text-green-400/70 text-xs font-mono truncate mt-0.5" title={r.user.walletAddress}>
-                              {r.user.walletAddress.slice(0, 6)}…{r.user.walletAddress.slice(-4)}
+                          {order.user.walletAddress ? (
+                            <div className="text-green-400/70 text-xs font-mono truncate" title={order.user.walletAddress}>
+                              {order.user.walletAddress.slice(0, 6)}…{order.user.walletAddress.slice(-4)}
                             </div>
                           ) : null}
-                          {r.user.email ? (
-                            <div className="text-white/40 text-xs truncate mt-0.5">{r.user.email}</div>
-                          ) : !r.user.walletAddress ? (
-                            <div className="text-white/20 text-xs mt-0.5">unknown</div>
+                          {order.user.email ? (
+                            <div className="text-white/40 text-xs truncate">{order.user.email}</div>
+                          ) : !order.user.walletAddress ? (
+                            <div className="text-white/20 text-xs">unknown advertiser</div>
                           ) : null}
-                          {r.creative?.destUrl && (
+                          {order.creative?.destUrl && (
                             <a
-                              href={r.creative.destUrl}
+                              href={order.creative.destUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-xs text-green-400 hover:text-green-300 truncate block max-w-xs mt-0.5"
                             >
-                              {r.creative.destUrl}
+                              {order.creative.destUrl}
                             </a>
                           )}
-                          {r.creative?.imageUrl ? (
+                          {order.creative?.imageUrl ? (
                             <a
-                              href={r.creative.imageUrl}
+                              href={order.creative.imageUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-[10px] text-white/20 hover:text-white/40 font-mono truncate block max-w-xs mt-0.5 transition-colors"
-                              title={r.creative.imageUrl}
+                              title={order.creative.imageUrl}
                             >
-                              {r.creative.imageUrl}
+                              {order.creative.imageUrl}
                             </a>
                           ) : (
                             <div className="text-[10px] text-red-400/60 mt-0.5">⚠ no imageUrl</div>
                           )}
                           <div className="text-white/30 text-xs mt-1">
-                            {new Date(r.createdAt).toLocaleString()}
+                            Live since: {order.startDate ? new Date(order.startDate).toLocaleString() : new Date(order.createdAt).toLocaleString()}
                           </div>
                         </div>
-                        <div className="flex-shrink-0">
+                        <div className="flex flex-col gap-1.5 flex-shrink-0">
                           <button
-                            onClick={() => act('expire', { rentalId: r.id })}
-                            className="bg-white/5 hover:bg-white/10 border border-white/20 text-white/60 text-xs px-3 py-1.5 rounded transition-colors"
+                            onClick={() => act('remove_order', { creativeId: order.creativeId ?? '' })}
+                            className="bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 text-xs px-3 py-1.5 rounded transition-colors"
                           >
-                            Expire
+                            Remove Ad
                           </button>
                         </div>
                       </div>
@@ -1265,14 +1280,23 @@ export default function AdminPage() {
                           {t.expiresAt && ` · Expires: ${new Date(t.expiresAt).toLocaleString()}`}
                         </div>
                         {t.txSignature && (
-                          <a
-                            href={`https://solscan.io/tx/${t.txSignature}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono block"
-                          >
-                            {t.txSignature.slice(0, 20)}… ↗
-                          </a>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`https://solscan.io/tx/${t.txSignature}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono"
+                            >
+                              {t.txSignature.slice(0, 20)}… ↗
+                            </a>
+                            <button
+                              onClick={() => checkTxSig(t.id, t.txSignature ?? undefined)}
+                              disabled={!!txSigRunning[t.id]}
+                              className="text-[10px] bg-green-500/15 hover:bg-green-500/25 border border-green-500/30 text-green-400 px-2 py-0.5 rounded transition-colors disabled:opacity-50 flex-shrink-0"
+                            >
+                              {txSigRunning[t.id] ? '…' : 'Check stored tx'}
+                            </button>
+                          </div>
                         )}
                       </div>
 
@@ -1453,6 +1477,27 @@ export default function AdminPage() {
                       When enabled, new rentals are submitted at $0/day for this many days.
                     </p>
                   </div>
+                </div>
+
+                <div className="border border-white/10 rounded-xl p-5 bg-white/2 space-y-4">
+                  <h3 className="text-sm font-bold text-white">Ad Moderation</h3>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="auto-approve-ads"
+                      checked={pricingForm.auto_approve_ads !== 'false'}
+                      onChange={(e) =>
+                        setPricingForm((f) => ({ ...f, auto_approve_ads: e.target.checked ? 'true' : 'false' }))
+                      }
+                      className="w-4 h-4 accent-amber-400"
+                    />
+                    <label htmlFor="auto-approve-ads" className="text-sm text-white/70 cursor-pointer">
+                      Auto-approve ads (go live immediately)
+                    </label>
+                  </div>
+                  <p className="text-white/30 text-xs">
+                    When ON, ads submitted by advertisers go live immediately. When OFF, they go to Pending Approval for manual review.
+                  </p>
                 </div>
 
                 <button

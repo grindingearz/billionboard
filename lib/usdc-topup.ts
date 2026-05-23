@@ -1,6 +1,8 @@
 import { prisma } from './prisma'
 import { env } from './env'
 
+const HELIUS_ENHANCED_TX_URL = 'https://api.helius.xyz/v0/transactions'
+
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 export const TOPUP_EXPIRY_HOURS = 24
 
@@ -148,6 +150,68 @@ export async function processUsdcTransfer(
     data: { signature, source, amountUsdc, senderWallet, receiverWallet, topupId: null },
   })
   return { topupId: null, matched: false, skipped: false, reason }
+}
+
+export type VerifyResult =
+  | { ok: true; found: true; results: Array<ProcessResult & { amount: number; sender: string }> }
+  | { ok: false; found: false; message: string }
+  | { ok: false; error: string }
+
+/**
+ * Fetch a transaction from Helius, find USDC transfers to the deposit wallet,
+ * and process each via processUsdcTransfer. Used by the auto-verify flow and
+ * the admin manual-recovery button.
+ */
+export async function verifyAndProcessSignature(signature: string): Promise<VerifyResult> {
+  const heliusApiKey = env.heliusApiKey
+  const depositWallet = getDepositWallet()
+
+  if (!heliusApiKey || !depositWallet) {
+    return { ok: false, error: 'HELIUS_API_KEY or AD_REVENUE_WALLET not configured' }
+  }
+
+  let resp: Response
+  try {
+    resp = await fetch(`${HELIUS_ENHANCED_TX_URL}?api-key=${heliusApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transactions: [signature.trim()] }),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Helius network error: ${msg}` }
+  }
+
+  if (!resp.ok) {
+    return { ok: false, error: `Helius HTTP ${resp.status}` }
+  }
+
+  let txs: unknown[]
+  try {
+    txs = await resp.json()
+  } catch {
+    return { ok: false, error: 'Helius returned non-JSON' }
+  }
+
+  if (!Array.isArray(txs) || txs.length === 0) {
+    return { ok: false, found: false, message: 'Transaction not found on Helius — may not be confirmed yet' }
+  }
+
+  const tx = txs[0] as HeliusTransaction
+  const transfers = parseUsdcTransfers(tx, depositWallet)
+
+  if (transfers.length === 0) {
+    return { ok: false, found: false, message: 'No USDC transfer to deposit wallet found in this transaction' }
+  }
+
+  const results: Array<ProcessResult & { amount: number; sender: string }> = []
+  for (const t of transfers) {
+    const result = await processUsdcTransfer(
+      tx.signature, t.fromUserAccount, t.toUserAccount, t.tokenAmount, 'reconcile', JSON.stringify(tx)
+    )
+    results.push({ ...result, amount: t.tokenAmount, sender: t.fromUserAccount })
+  }
+  return { ok: true, found: true, results }
 }
 
 /** Mark PENDING usdc_solana topups past their expiresAt as EXPIRED. */

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { TOTAL_TILES, isRectangularSelection } from '@/lib/types'
-import { getTilePrice, isFreeRentalEnabled } from '@/lib/settings'
+import { getTilePrice, isFreeRentalEnabled, isAutoApproveEnabled } from '@/lib/settings'
 
 // Strips any existing protocol and ensures https:// prefix.
 // Handles: brainrush.gg → https://brainrush.gg, http://… → https://…
@@ -84,19 +84,20 @@ export async function POST(req: Request) {
   }
 
   // Fetch pricing settings
-  const [tilePrice, freeEnabled] = await Promise.all([getTilePrice(), isFreeRentalEnabled()])
+  const [tilePrice, freeEnabled, autoApprove] = await Promise.all([getTilePrice(), isFreeRentalEnabled(), isAutoApproveEnabled()])
 
   const dailyRate = freeEnabled ? 0 : tilePrice
 
   if (!freeEnabled) {
-    // Check sufficient balance (1 day reserve)
-    const requiredBalance = uniqueTileIds.length * tilePrice
+    // Check sufficient balance (1 day reserve); use integer cents to avoid float precision errors
+    const requiredCents = Math.round(uniqueTileIds.length * tilePrice * 100)
     const wallet = await prisma.advertiserWallet.findUnique({
       where: { userId: session.userId },
     })
-    if (!wallet || Number(wallet.usdcBalance) < requiredBalance) {
+    const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+    if (!wallet || walletCents < requiredCents) {
       return NextResponse.json(
-        { error: `Insufficient balance. Need $${requiredBalance.toFixed(2)} USDC` },
+        { error: `Insufficient balance. Need $${(requiredCents / 100).toFixed(2)} USDC` },
         { status: 402 }
       )
     }
@@ -114,7 +115,8 @@ export async function POST(req: Request) {
             userId: session.userId,
             tileId,
             creativeId: creative.id,
-            status: 'PENDING_APPROVAL',
+            status: autoApprove ? 'ACTIVE' : 'PENDING_APPROVAL',
+            startDate: autoApprove ? new Date() : null,
             dailyRate,
           },
         })
@@ -123,7 +125,7 @@ export async function POST(req: Request) {
     return { creative, rentals }
   })
 
-  return NextResponse.json({ ok: true, rentalCount: result.rentals.length }, { status: 201 })
+  return NextResponse.json({ ok: true, rentalCount: result.rentals.length, autoApproved: autoApprove }, { status: 201 })
 }
 
 export async function DELETE(req: Request) {

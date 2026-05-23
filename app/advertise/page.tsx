@@ -8,7 +8,7 @@ import { getAssociatedTokenAddress, createTransferInstruction } from '@solana/sp
 import Billboard from '@/components/Billboard'
 import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
-import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection, runRectangularSelectionTests } from '@/lib/types'
+import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection, runRectangularSelectionTests, canAffordCents, shortfallCents as balanceShortfallCents, runBalancePrecisionTests } from '@/lib/types'
 import type { TileInfoMap, DisplayMode } from '@/lib/types'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
@@ -38,6 +38,8 @@ export default function AdvertisePage() {
   const [tiles, setTiles] = useState<TileInfoMap>({})
   const [tilePrice, setTilePrice] = useState(1)
   const [freeRental, setFreeRental] = useState({ enabled: false, days: 0 })
+  const [autoApproveEnabled, setAutoApproveEnabled] = useState(true)
+  const [submittedAutoApproved, setSubmittedAutoApproved] = useState(false)
   const [selectedTiles, setSelectedTiles] = useState<Set<number>>(new Set())
   const [step, setStep] = useState<Step>('select')
   const [topupAmount, setTopupAmount] = useState('10')
@@ -199,6 +201,7 @@ export default function AdvertisePage() {
           enabled: data.settings.free_rental_enabled === 'true',
           days: parseInt(data.settings.free_rental_days, 10) || 0,
         })
+        setAutoApproveEnabled(data.settings.auto_approve_ads !== 'false')
       }
     } catch { /* fallback to $1 */ }
   }, [])
@@ -209,10 +212,11 @@ export default function AdvertisePage() {
     loadSettings()
   }, [loadTiles, loadBalance, loadSettings])
 
-  // Dev: verify rectangular selection logic on mount; check browser console for results
+  // Dev: verify selection and balance precision logic on mount; check browser console for results
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production') {
       runRectangularSelectionTests()
+      runBalancePrecisionTests()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -321,7 +325,7 @@ export default function AdvertisePage() {
       setPayStatus('submitting')
       const signature = await sendTransaction(tx, connection)
 
-      // 4. Store signature immediately (backend will match on it during reconcile/webhook)
+      // 4. Store signature immediately, then kick off immediate Helius verify
       await fetch('/api/topup', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -331,6 +335,13 @@ export default function AdvertisePage() {
       setPendingDeposit((prev) => prev ? { ...prev, txSignature: signature } : null)
       sentAtRef.current = Date.now()
       setPayStatus('confirming')
+
+      // Immediately check — backend attempts Helius confirmation right away
+      fetch('/api/topup/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topupId }),
+      }).catch(() => {})
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       const isCancel = /reject|cancel|user denied/i.test(msg)
@@ -403,6 +414,32 @@ export default function AdvertisePage() {
       if (sentAtRef.current > 0 && payStatus === 'confirming' && Date.now() - sentAtRef.current > 60_000) {
         setPayStatus('timeout')
       }
+
+      // Use /api/topup/check when a sig is stored — it triggers Helius verification each poll.
+      // Fall back to plain GET if no sig yet.
+      if (pendingDeposit.txSignature) {
+        try {
+          const res = await fetch('/api/topup/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topupId: pendingDeposit.topupId }),
+          })
+          if (!res.ok) return
+          const data = await res.json() as { ok: boolean; status?: string; balance?: number }
+          if (data.balance != null) setBalance(data.balance)
+          if (data.status && data.status !== 'PENDING') {
+            setPendingDeposit(null)
+            setShowTopup(false)
+            setPayStatus('idle')
+            sentAtRef.current = 0
+            setTopupSuccess(true)
+            setTimeout(() => setTopupSuccess(false), 5000)
+          }
+        } catch { /* ignore, retry next tick */ }
+        return
+      }
+
+      // No sig stored yet — plain poll to pick up balance/status changes
       const res = await fetch('/api/topup')
       if (!res.ok) return
       const data = await res.json()
@@ -477,6 +514,7 @@ export default function AdvertisePage() {
     })
     const data = await res.json()
     if (res.ok) {
+      setSubmittedAutoApproved((data as { autoApproved?: boolean }).autoApproved ?? false)
       setStep('submitted')
       await loadTiles()
     } else {
@@ -486,7 +524,7 @@ export default function AdvertisePage() {
   }
 
   const cost = selectedTiles.size * tilePrice
-  const canAfford = freeRental.enabled || balance !== null && balance >= cost
+  const canAfford = freeRental.enabled || (balance !== null && canAffordCents(balance, cost))
 
   const blockInfo = useMemo(() => {
     if (selectedTiles.size === 0) return null
@@ -531,9 +569,13 @@ export default function AdvertisePage() {
       <div className="min-h-screen flex items-center justify-center px-4">
         <div className="text-center max-w-sm">
           <div className="text-4xl mb-4">✓</div>
-          <h2 className="text-2xl font-black text-white mb-2">Submitted for review</h2>
+          <h2 className="text-2xl font-black text-white mb-2">
+            {submittedAutoApproved ? 'Your ad is live!' : 'Submitted for review'}
+          </h2>
           <p className="text-white/50 text-sm mb-6">
-            Your ad is pending admin approval. You&apos;ll see it go live on the board once approved.
+            {submittedAutoApproved
+              ? 'Your ad is live and will appear on the board shortly. Billing starts today.'
+              : 'Your ad is pending admin approval. You\'ll see it go live on the board once approved.'}
           </p>
           <button
             onClick={() => {
@@ -1145,7 +1187,7 @@ export default function AdvertisePage() {
 
             {!canAfford && !freeRental.enabled && (
               <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-                Insufficient balance. Top up at least ${(cost - (balance ?? 0)).toFixed(2)} USDC.
+                Insufficient balance. Top up at least ${(balanceShortfallCents(balance ?? 0, cost) / 100).toFixed(2)} USDC.
               </div>
             )}
 
@@ -1168,8 +1210,9 @@ export default function AdvertisePage() {
             )}
 
             <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3">
-              Your ad will be reviewed before going live. Billing starts on approval. Balance is
-              deducted daily — if it runs out, your tiles are released.
+              {autoApproveEnabled
+                ? 'Your ad goes live immediately. Balance is deducted daily — if it runs out, your tiles are released.'
+                : 'Your ad will be reviewed before going live. Billing starts on approval. Balance is deducted daily — if it runs out, your tiles are released.'}
             </div>
 
             <div className="flex gap-3">
@@ -1184,7 +1227,7 @@ export default function AdvertisePage() {
                 disabled={submitting || !canAfford || !publicKey}
                 className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
               >
-                {submitting ? 'Submitting…' : 'Submit for approval'}
+                {submitting ? 'Submitting…' : autoApproveEnabled ? 'Go Live →' : 'Submit for approval'}
               </button>
             </div>
           </div>
