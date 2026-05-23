@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import Link from 'next/link'
 import Billboard from './Billboard'
 import Loupe from './Loupe'
 import type { TileInfoMap, TileInfo } from '@/lib/types'
@@ -144,7 +145,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     })
   }, [tiles])
 
-  // creativeId → tile count (for hover card + loupe)
   const creativeTileCount = useMemo(() => {
     const m = new Map<string, number>()
     for (const g of adGroups) m.set(g.key, g.tileIds.length)
@@ -165,7 +165,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return () => ro.disconnect()
   }, [])
 
-  // Smart initial camera: zoom to largest ad group to fill ~20% of viewport, else fit
+  // Smart initial camera
   useEffect(() => {
     if (initialScrollDone.current) return
     const el = boardContainerRef.current
@@ -178,15 +178,12 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         : containerSize.w || 800
 
     if (adGroups.length > 0) {
-      // Pick largest group by tile count
       const largest = adGroups.reduce((best, g) => g.tileIds.length >= best.tileIds.length ? g : best)
       const spanCols = Math.max(1, largest.maxCol - largest.minCol + 1)
       const spanRows = Math.max(1, largest.maxRow - largest.minRow + 1)
-      // Compute zoom so the group occupies ~20% of viewport in both dimensions
       const zColTarget = (0.20 * BOARD_COLUMNS) / spanCols
       const zRowTarget = (0.20 * BOARD_ROWS) / spanRows
       const zTarget = Math.min(zColTarget, zRowTarget)
-      // Find nearest zoom level, minimum 2×
       const MIN_ZOOM_IDX = 2
       const idealIdx = ZOOM_LEVELS.reduce(
         (best, z, idx) => Math.abs(z - zTarget) < Math.abs(ZOOM_LEVELS[best] - zTarget) ? idx : best,
@@ -225,7 +222,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return () => el.removeEventListener('wheel', onWheel)
   }, [zoomIn, zoomOut])
 
-  // Scroll to a fractional col/row at a given zoom index
   const scrollToPosition = useCallback(
     (col: number, row: number, targetZoomIdx: number) => {
       const el = boardContainerRef.current
@@ -240,26 +236,18 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
       const newBoardH = (newFitW / aspect) * newZoom
       setZoomIdx(newZoomIdx)
       requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(
-          0,
-          ((col + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2
-        )
-        el.scrollTop = Math.max(
-          0,
-          ((row + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2
-        )
+        el.scrollLeft = Math.max(0, ((col + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2)
+        el.scrollTop = Math.max(0, ((row + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2)
       })
     },
     [containerSize, aspect]
   )
 
-  // Ad navigation
   const jumpToAds = useCallback(() => {
     if (adGroups.length === 0) return
     const allIds = adGroups.flatMap((g) => g.tileIds)
     const avgCol = allIds.reduce((s, id) => s + (id % BOARD_COLUMNS), 0) / allIds.length
-    const avgRow =
-      allIds.reduce((s, id) => s + Math.floor(id / BOARD_COLUMNS), 0) / allIds.length
+    const avgRow = allIds.reduce((s, id) => s + Math.floor(id / BOARD_COLUMNS), 0) / allIds.length
     scrollToPosition(avgCol, avgRow, AD_ZOOM_IDX)
     setCurrentAdIdx(0)
   }, [adGroups, scrollToPosition])
@@ -300,7 +288,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     })
   }, [containerSize, aspect])
 
-  // Loupe + hover card cursor tracking (always active)
   const [loupeEnabled, setLoupeEnabled] = useState(false)
   const [loupeCursor, setLoupeCursor] = useState<{
     tileId: number | null
@@ -337,7 +324,6 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     [tiles]
   )
 
-  // Hover card for active ads (shown when loupe is off)
   const hoveredTileId = loupeCursor?.tileId ?? null
   const hoverTileInfo = hoveredTileId !== null ? tiles[hoveredTileId] : undefined
   const showHoverCard =
@@ -356,8 +342,26 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return cid ? (creativeTileCount.get(cid) ?? 1) : 1
   })()
 
+  // Collapsible legend
+  const [legendOpen, setLegendOpen] = useState(false)
+  const legendRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!legendOpen) return
+    const handler = (e: MouseEvent) => {
+      if (legendRef.current && !legendRef.current.contains(e.target as Node)) {
+        setLegendOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [legendOpen])
+
+  const priceLabel = tilePrice > 0 ? `$${tilePrice.toFixed(2)}` : 'Free'
+
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full bg-black">
+      {/* Board scroll container */}
       <div ref={boardContainerRef} className="absolute inset-0 overflow-auto">
         <div
           className="flex items-center justify-center"
@@ -379,6 +383,35 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         </div>
       </div>
 
+      {/* Edge vignette — subtle depth around board viewport */}
+      <div
+        className="absolute inset-0 z-10 pointer-events-none"
+        style={{ boxShadow: 'inset 0 0 80px 20px rgba(0,0,0,0.6)' }}
+      />
+
+      {/* Empty board state — shown when no active ads */}
+      {adGroups.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <div className="pointer-events-auto flex flex-col items-center text-center">
+            <div className="bg-black/75 border border-white/10 rounded-2xl px-8 py-6 max-w-xs shadow-2xl shadow-black/70">
+              <div className="w-6 h-6 rounded-full border border-white/20 flex items-center justify-center mx-auto mb-3">
+                <div className="w-1.5 h-1.5 rounded-full bg-white/30" />
+              </div>
+              <div className="text-white font-bold text-base mb-1">Be the first on the board.</div>
+              <div className="text-white/40 text-xs mb-1">100,000 tiles available</div>
+              <div className="text-white/25 text-xs mb-4">{priceLabel}/tile/day</div>
+              <Link
+                href="/advertise"
+                className="inline-flex items-center gap-1.5 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2 rounded-lg text-sm transition-colors"
+              >
+                Rent Tiles →
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loupe */}
       {loupeEnabled && loupeCursor && (
         <Loupe
           sourceCanvas={loupeCursor.canvas}
@@ -396,6 +429,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         />
       )}
 
+      {/* Hover card */}
       {showHoverCard && loupeCursor && (
         <ActiveAdCard
           tileInfo={hoverTileInfo!}
@@ -406,55 +440,80 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         />
       )}
 
-      {/* Legend */}
-      <div className="absolute top-3 right-3 z-20 flex flex-col gap-1.5 bg-black/70 border border-white/10 rounded-lg px-3 py-2 text-xs">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-sm bg-white/10 border border-white/20 shrink-0" />
-          <span className="text-white/40">Available</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-sm bg-amber-400/40 border border-amber-400/30 shrink-0" />
-          <span className="text-white/40">Pending</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-sm bg-green-400/50 border border-green-400/30 shrink-0" />
-          <span className="text-white/40">Active</span>
-        </div>
-        {adGroups.length === 0 && (
-          <div className="mt-0.5 text-white/25 text-[10px] leading-tight max-w-[120px]">
-            No ads yet — be the first!
+      {/* Status legend — collapsible pill, top right */}
+      <div ref={legendRef} className="absolute top-3 right-3 z-20">
+        <button
+          onClick={() => setLegendOpen((v) => !v)}
+          className="flex items-center gap-1.5 bg-black/80 border border-white/15 rounded-full px-3 py-1.5 text-[11px] text-white/50 hover:text-white/80 hover:border-white/30 transition-colors"
+          title="Tile status legend"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="shrink-0">
+            <circle cx="5" cy="5" r="4" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M5 4.5v2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <circle cx="5" cy="3" r="0.75" fill="currentColor" />
+          </svg>
+          <span className="hidden sm:inline">Status</span>
+          <span
+            style={{
+              display: 'inline-block',
+              transform: legendOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 150ms',
+              lineHeight: 1,
+            }}
+          >
+            ▾
+          </span>
+        </button>
+
+        {legendOpen && (
+          <div className="absolute top-full right-0 mt-1.5 bg-black/92 border border-white/10 rounded-xl px-3 py-3 min-w-[148px] shadow-xl shadow-black/70">
+            <div className="space-y-2 mb-2.5">
+              {[
+                { swatch: 'bg-white/10 border border-white/20', label: 'Available' },
+                { swatch: 'bg-amber-400/40 border border-amber-400/30', label: 'Pending' },
+                { swatch: 'bg-green-400/50 border border-green-400/30', label: 'Active' },
+              ].map(({ swatch, label }) => (
+                <div key={label} className="flex items-center gap-2 text-xs">
+                  <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${swatch}`} />
+                  <span className="text-white/50">{label}</span>
+                </div>
+              ))}
+            </div>
+            <div className="border-t border-white/10 pt-2 text-[10px] text-white/25 leading-snug">
+              Zoom in to explore live ads.
+            </div>
           </div>
         )}
       </div>
 
-      {/* Floating controls */}
-      <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1 items-start">
-        {/* Ad navigation row (only when active ads exist) */}
-        {adGroups.length > 0 && (
-          <div className="flex items-center gap-1 bg-black/80 border border-green-400/20 rounded-lg px-2 py-1 text-xs">
+      {/* Controls — bottom left */}
+      <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1.5 items-start">
+        {/* Ad navigation */}
+        {adGroups.length > 0 ? (
+          <div className="flex items-center gap-1 bg-black/80 border border-green-400/20 rounded-lg px-2 py-1.5 text-xs">
             <button
               onClick={jumpToAds}
-              className="text-green-400 hover:text-green-300 transition-colors font-medium px-1"
-              title="Center on active ads"
+              className="text-green-400 hover:text-green-300 transition-colors font-medium px-0.5"
+              title="Jump to active ads"
             >
-              Jump to Ads
+              Ads
             </button>
             {adGroups.length > 1 && (
               <>
-                <span className="text-white/20 mx-0.5">·</span>
+                <span className="text-white/15 mx-0.5">·</span>
                 <button
                   onClick={prevAd}
-                  className="w-5 h-5 flex items-center justify-center text-white/60 hover:text-white transition-colors text-base leading-none"
+                  className="w-5 h-5 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
                   title="Previous ad"
                 >
                   ‹
                 </button>
-                <span className="text-white/50 text-[11px] tabular-nums w-7 text-center">
+                <span className="text-white/40 text-[11px] tabular-nums w-8 text-center select-none">
                   {currentAdIdx + 1}/{adGroups.length}
                 </span>
                 <button
                   onClick={nextAd}
-                  className="w-5 h-5 flex items-center justify-center text-white/60 hover:text-white transition-colors text-base leading-none"
+                  className="w-5 h-5 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
                   title="Next ad"
                 >
                   ›
@@ -462,46 +521,48 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
               </>
             )}
           </div>
-        )}
+        ) : null}
 
-        {/* Zoom + Fit + Loupe row */}
-        <div className="flex items-center gap-1 bg-black/80 border border-white/10 rounded-lg px-2 py-1 text-xs">
+        {/* Zoom · Fit · Loupe */}
+        <div className="flex items-center bg-black/80 border border-white/10 rounded-lg text-xs overflow-hidden">
           <button
             onClick={zoomOut}
             disabled={zoomIdx === 0}
-            className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 transition-colors font-bold"
+            className="w-8 h-8 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
             title="Zoom out"
           >
             −
           </button>
-          <span className="text-white/60 w-8 text-center tabular-nums">{zoom}×</span>
+          <span className="text-white/45 w-9 text-center tabular-nums text-[11px] select-none">
+            {zoom}×
+          </span>
           <button
             onClick={zoomIn}
             disabled={zoomIdx === ZOOM_LEVELS.length - 1}
-            className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 transition-colors font-bold"
+            className="w-8 h-8 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
             title="Zoom in"
           >
             +
           </button>
-          <span className="text-white/20 mx-0.5">|</span>
+          <div className="w-px h-4 bg-white/10 mx-0.5" />
           <button
             onClick={fitBoard}
-            className="text-white/50 hover:text-white transition-colors px-1"
+            className="px-2.5 h-8 text-white/40 hover:text-white/70 hover:bg-white/5 transition-colors text-[11px]"
             title="Fit board to screen"
           >
-            Fit Board
+            Fit
           </button>
-          <span className="text-white/20 mx-0.5">|</span>
+          <div className="w-px h-4 bg-white/10 mx-0.5" />
           <button
             onClick={() => setLoupeEnabled((v) => !v)}
-            className={`px-1.5 py-0.5 rounded transition-colors ${
+            className={`px-2.5 h-8 transition-colors text-[11px] ${
               loupeEnabled
-                ? 'text-green-400 bg-green-400/10 hover:bg-green-400/20'
-                : 'text-white/40 hover:text-white/70'
+                ? 'text-green-400 bg-green-400/10 hover:bg-green-400/15'
+                : 'text-white/40 hover:text-white/70 hover:bg-white/5'
             }`}
             title="Toggle magnifier"
           >
-            🔍 {loupeEnabled ? 'On' : 'Off'}
+            Loupe{loupeEnabled ? ' ✓' : ''}
           </button>
         </div>
       </div>
