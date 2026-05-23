@@ -1,30 +1,120 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { TOTAL_TILES } from '@/lib/types'
+import { getTilePrice, getSetting } from '@/lib/settings'
+import { getOrCreateEpoch, todayUtc, msUntilUtcClose } from '@/lib/epoch'
 
 export async function GET() {
-  const [activeTiles, pendingTiles, totalRevenue, latestEpoch, recentBillingRuns] =
-    await Promise.all([
+  try {
+    const now = new Date()
+    const today = todayUtc()
+    const todayEnd = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+    )
+
+    const [
+      activeTiles,
+      pendingTiles,
+      activeAdvertisers,
+      revenueAgg,
+      totalDistributed,
+      totalClaimPoolAllocated,
+      epochs,
+      recentBillingRuns,
+      todayAd,
+      todayFee,
+      tilePrice,
+      feePercentStr,
+      currentEpoch,
+    ] = await Promise.all([
       prisma.adRental.count({ where: { status: 'ACTIVE' } }),
       prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
-      prisma.revenueEvent.aggregate({ _sum: { amount: true } }),
-      prisma.distributionEpoch.findFirst({
+      prisma.adRental
+        .findMany({ where: { status: 'ACTIVE' }, select: { userId: true }, distinct: ['userId'] })
+        .then((rows) => rows.length),
+      prisma.revenueEvent.aggregate({
+        where: { type: { in: ['AD_RENT_REVENUE', 'TRADING_FEE_REVENUE'] } },
+        _sum: { amount: true },
+      }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'CLAIM_PAYOUT' },
+        _sum: { amount: true },
+      }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'CLAIM_POOL_ALLOCATION' },
+        _sum: { amount: true },
+      }),
+      prisma.distributionEpoch.findMany({
         orderBy: { epochDate: 'desc' },
-        select: { epochDate: true, totalPool: true, status: true },
+        take: 30,
+        select: {
+          epochDate: true,
+          adRevenue: true,
+          tradingFeeRevenue: true,
+          grossPool: true,
+          managementFeePercent: true,
+          managementFeeAmount: true,
+          claimPoolAmount: true,
+          totalPool: true,
+          eligibleSupply: true,
+          snapshotDate: true,
+          status: true,
+        },
       }),
       prisma.dailyBillingRun.findMany({
         orderBy: { runDate: 'desc' },
         take: 7,
         select: { runDate: true, tilesCharged: true, totalRevenue: true, status: true },
       }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'AD_RENT_REVENUE', createdAt: { gte: today, lte: todayEnd } },
+        _sum: { amount: true },
+      }),
+      prisma.revenueEvent.aggregate({
+        where: { type: 'TRADING_FEE_REVENUE', createdAt: { gte: today, lte: todayEnd } },
+        _sum: { amount: true },
+      }),
+      getTilePrice(),
+      getSetting('management_fee_percent'),
+      getOrCreateEpoch(today),
     ])
 
-  return NextResponse.json({
-    activeTiles,
-    pendingTiles,
-    availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
-    totalRevenue: totalRevenue._sum.amount ?? 0,
-    latestEpoch,
-    recentBillingRuns,
-  })
+    const todayAdRevenue = Number(todayAd._sum.amount ?? 0)
+    const todayFeeRevenue = Number(todayFee._sum.amount ?? 0)
+    const todayGross = todayAdRevenue + todayFeeRevenue
+    const feePercent = Math.max(0, Math.min(100, parseFloat(feePercentStr) || 10))
+    const todayMgmtFee = todayGross * (feePercent / 100)
+    const todayClaimPool = todayGross - todayMgmtFee
+
+    return NextResponse.json({
+      activeTiles,
+      pendingTiles,
+      availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
+      activeAdvertisers,
+      totalRevenue: Number(revenueAgg._sum.amount ?? 0),
+      totalDistributed: Number(totalDistributed._sum.amount ?? 0),
+      totalClaimPoolAllocated: Number(totalClaimPoolAllocated._sum.amount ?? 0),
+      tilePrice,
+      feePercent,
+      msUntilClose: msUntilUtcClose(),
+      today: {
+        adRevenue: todayAdRevenue,
+        feeRevenue: todayFeeRevenue,
+        grossPool: todayGross,
+        managementFee: todayMgmtFee,
+        claimPool: todayClaimPool,
+      },
+      currentEpoch: {
+        epochDate: currentEpoch.epochDate,
+        status: currentEpoch.status,
+      },
+      epochs,
+      recentBillingRuns,
+    })
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Internal error' },
+      { status: 500 }
+    )
+  }
 }

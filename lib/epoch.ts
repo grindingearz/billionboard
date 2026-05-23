@@ -54,6 +54,18 @@ export async function getOrCreateEpoch(date: Date) {
   })
 }
 
+/** Get or auto-create today's UTC epoch. */
+export async function getOrCreateCurrentEpoch() {
+  return getOrCreateEpoch(todayUtc())
+}
+
+/** Pure fee math — no DB access. */
+export function calculateDistributionAmounts(grossPool: number, managementFeePercent: number) {
+  const managementFeeAmount = (grossPool * managementFeePercent) / 100
+  const balanceToDistribute = grossPool - managementFeeAmount
+  return { managementFeeAmount, balanceToDistribute }
+}
+
 /**
  * Close a UTC calendar day's epoch end-to-end:
  *   OPEN/DRAFT/BILLED/FAILED → PROCESSING → BILLED → SNAPSHOTTED → PUBLISHED

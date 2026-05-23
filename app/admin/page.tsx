@@ -232,6 +232,7 @@ export default function AdminPage() {
   const [snapshotRunning, setSnapshotRunning] = useState(false)
   const [newExcludedWallet, setNewExcludedWallet] = useState('')
   const [newExcludedLabel, setNewExcludedLabel] = useState('')
+  const [showAdvancedEpoch, setShowAdvancedEpoch] = useState(false)
   const [currentEpochData, setCurrentEpochData] = useState<CurrentEpochData | null>(null)
   const [epochCountdown, setEpochCountdown] = useState('')
   const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null)
@@ -543,6 +544,24 @@ export default function AdminPage() {
     } else {
       setActionMsg(d.error ?? 'Snapshot failed')
     }
+  }
+
+  const exportEpochsCsv = () => {
+    const headers = ['Date', 'Ad Fees (USDC)', 'Trading Fees (USDC)', 'Gross Fees (USDC)', 'Mgmt Fee %', 'Mgmt Fee Amount (USDC)', 'Balance to Distribute (USDC)', 'Eligible Supply', 'Status']
+    const rows = distEpochs.map((ep) => {
+      const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
+      const ed = new Date(ep.epochDate)
+      const dateStr = `${ed.getUTCFullYear()}-${String(ed.getUTCMonth()+1).padStart(2,'0')}-${String(ed.getUTCDate()).padStart(2,'0')}`
+      return [dateStr, Number(ep.adRevenue).toFixed(6), Number(ep.tradingFeeRevenue).toFixed(6), Number(ep.grossPool).toFixed(6), Number(ep.managementFeePercent).toFixed(2), Number(ep.managementFeeAmount).toFixed(6), claimPool.toFixed(6), ep.eligibleSupply ?? '0', ep.status]
+    })
+    const csv = [headers, ...rows].map((r) => r.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `epochs-${new Date().toISOString().split('T')[0]}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const runReconcile = async () => {
@@ -1059,101 +1078,71 @@ export default function AdminPage() {
           )}
 
           {view === 'epochs' && (
-            <div className="space-y-6">
-              {/* Create epoch form */}
-              <div className="border border-white/10 rounded-xl p-5 bg-white/2">
-                <h3 className="text-sm font-bold text-white mb-3">Create new epoch</h3>
-                <form onSubmit={createEpoch} className="flex gap-3">
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={epochForm.totalPool}
-                    onChange={(e) => setEpochForm({ totalPool: e.target.value })}
-                    placeholder="Total pool (USDC)"
-                    className="flex-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!epochForm.totalPool}
-                    className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-sm px-4 py-2 rounded transition-colors disabled:opacity-50"
-                  >
-                    Create
-                  </button>
-                </form>
-              </div>
-
-              {/* Mock snapshot form */}
-              <div className="border border-white/10 rounded-xl p-5 bg-white/2">
-                <h3 className="text-sm font-bold text-white mb-1">Mock holder snapshot</h3>
-                <p className="text-white/30 text-xs mb-3">
-                  Enter wallets as &quot;wallet_address:token_balance&quot; per line.
-                  {/* TODO: replace with real Solana token holder indexing */}
+            <div className="space-y-4">
+              <div className="border border-white/5 rounded-xl p-4 bg-white/2">
+                <p className="text-white/50 text-sm">
+                  Epochs are created automatically each UTC calendar day.{' '}
+                  <button onClick={() => setView('distribution')} className="text-amber-400 hover:text-amber-300 underline transition-colors">
+                    Use the Distribution tab
+                  </button>{' '}
+                  to manage epochs, run snapshots, and publish claim pools.
                 </p>
-                <form onSubmit={submitSnapshot} className="space-y-3">
-                  <input
-                    value={snapshotForm.epochId}
-                    onChange={(e) => setSnapshotForm((f) => ({ ...f, epochId: e.target.value }))}
-                    placeholder="Epoch ID"
-                    className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
-                  />
-                  <textarea
-                    value={snapshotForm.wallets}
-                    onChange={(e) => setSnapshotForm((f) => ({ ...f, wallets: e.target.value }))}
-                    placeholder={'9xYz…wallet1:1000000\n7aBC…wallet2:500000'}
-                    rows={4}
-                    className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!snapshotForm.epochId}
-                    className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-xs px-4 py-2 rounded transition-colors disabled:opacity-50"
-                  >
-                    Take snapshot
-                  </button>
-                </form>
               </div>
 
-              {/* Epoch list */}
-              {epochs.length > 0 && (
-                <div className="space-y-2">
-                  {epochs.map((ep) => (
-                    <div
-                      key={ep.id}
-                      className="border border-white/10 rounded-xl p-4 bg-white/2 flex items-center justify-between"
-                    >
-                      <div>
-                        <div className="text-white text-sm">
-                          {new Date(ep.epochDate).toLocaleDateString()}
-                        </div>
-                        <div className="text-white/40 text-xs font-mono">{ep.id}</div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono text-green-400">
-                          ${Number(ep.totalPool).toFixed(2)}
-                        </span>
-                        <span
-                          className={`text-xs px-2 py-0.5 rounded-full ${
-                            ep.status === 'PUBLISHED'
-                              ? 'bg-green-400/10 text-green-400'
-                              : 'bg-amber-400/10 text-amber-400'
-                          }`}
-                        >
-                          {ep.status}
-                        </span>
-                        {ep.status !== 'PUBLISHED' && ep.status !== 'CLOSED' && (
-                          <button
-                            onClick={() => act('publish_epoch', { epochId: ep.id })}
-                            className="text-xs bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 px-3 py-1 rounded transition-colors"
-                          >
-                            Publish
-                          </button>
-                        )}
-                      </div>
+              {/* Advanced / Developer section */}
+              <div className="border border-white/5 rounded-xl overflow-hidden">
+                <button
+                  onClick={() => setShowAdvancedEpoch((v) => !v)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-xs text-white/30 hover:text-white/50 transition-colors"
+                >
+                  <span className="uppercase tracking-widest">Advanced / Developer</span>
+                  <span>{showAdvancedEpoch ? '▲' : '▼'}</span>
+                </button>
+                {showAdvancedEpoch && (
+                  <div className="px-4 pb-4 space-y-5 border-t border-white/5">
+                    <div className="pt-4">
+                      <h3 className="text-sm font-bold text-white mb-1">Create epoch manually</h3>
+                      <p className="text-white/30 text-xs mb-3">Only for testing or recovery. Daily epochs are auto-created.</p>
+                      <form onSubmit={createEpoch} className="flex gap-3">
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={epochForm.totalPool}
+                          onChange={(e) => setEpochForm({ totalPool: e.target.value })}
+                          placeholder="Total pool (USDC)"
+                          className="flex-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400"
+                        />
+                        <button type="submit" disabled={!epochForm.totalPool}
+                          className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-sm px-4 py-2 rounded transition-colors disabled:opacity-50">
+                          Create
+                        </button>
+                      </form>
                     </div>
-                  ))}
-                </div>
-              )}
+                    <div className="pt-2 border-t border-white/5">
+                      <h3 className="text-sm font-bold text-white mb-1">Mock holder snapshot</h3>
+                      <p className="text-white/30 text-xs mb-3">Enter wallets as &quot;wallet_address:token_balance&quot; per line.</p>
+                      <form onSubmit={submitSnapshot} className="space-y-3">
+                        <input
+                          value={snapshotForm.epochId}
+                          onChange={(e) => setSnapshotForm((f) => ({ ...f, epochId: e.target.value }))}
+                          placeholder="Epoch ID"
+                          className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                        />
+                        <textarea
+                          value={snapshotForm.wallets}
+                          onChange={(e) => setSnapshotForm((f) => ({ ...f, wallets: e.target.value }))}
+                          placeholder={'9xYz…wallet1:1000000\n7aBC…wallet2:500000'}
+                          rows={4}
+                          className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                        />
+                        <button type="submit" disabled={!snapshotForm.epochId}
+                          className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-xs px-4 py-2 rounded transition-colors disabled:opacity-50">
+                          Take snapshot
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -1504,150 +1493,165 @@ export default function AdminPage() {
                     const { epoch: ce, liveRevenue: lr } = currentEpochData
                     const d = new Date(ce.epochDate)
                     const dateStr = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC`
+                    const boardMint = process.env.NEXT_PUBLIC_BOARD_MINT ?? ''
+                    const hasBoardMint = !!boardMint
+                    const ceStatusColor =
+                      ce.status === 'OPEN' ? 'text-cyan-400 bg-cyan-400/10'
+                      : ce.status === 'PUBLISHED' ? 'text-green-400 bg-green-400/10'
+                      : ce.status === 'READY_NO_TOKEN' ? 'text-purple-400 bg-purple-400/10'
+                      : ce.status === 'FAILED' ? 'text-red-400 bg-red-400/10'
+                      : 'text-amber-400 bg-amber-400/10'
                     return (
                       <div className="border border-amber-400/30 bg-amber-400/5 rounded-xl p-4 space-y-3">
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
                           <div>
                             <div className="text-[10px] text-amber-400/60 uppercase tracking-widest mb-0.5">Current UTC Epoch</div>
                             <div className="text-white font-bold">{dateStr}</div>
                           </div>
-                          <div className="text-right">
-                            <div className="text-[10px] text-white/30 uppercase tracking-widest mb-0.5">Closes in</div>
-                            <div className="font-mono text-amber-400 font-bold">{epochCountdown}</div>
+                          <div className="flex items-center gap-3">
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ceStatusColor}`}>{ce.status}</span>
+                            <div className="text-right">
+                              <div className="text-[10px] text-white/30 uppercase tracking-widest mb-0.5">Closes in</div>
+                              <div className="font-mono text-amber-400 font-bold">{epochCountdown}</div>
+                            </div>
                           </div>
                         </div>
-                        <div className="grid grid-cols-3 gap-2 text-xs">
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                           {[
-                            { label: 'Ad revenue', v: lr.adRevenue, color: 'text-green-400' },
-                            { label: 'Fee revenue', v: lr.tradingFeeRevenue, color: 'text-blue-400' },
-                            { label: 'Est. claim pool', v: lr.estimatedClaimPool, color: 'text-amber-400' },
+                            { label: 'Advertising fees', v: lr.adRevenue, color: 'text-green-400' },
+                            { label: 'Trading fees', v: lr.tradingFeeRevenue, color: 'text-blue-400' },
+                            { label: 'Gross fees', v: lr.grossPool, color: 'text-white' },
+                            { label: `Mgmt fee (${lr.feePercent}%)`, v: lr.estimatedMgmtFee, color: 'text-white/50' },
+                            { label: 'Balance to distribute', v: lr.estimatedClaimPool, color: 'text-green-400' },
                           ].map(({ label, v, color }) => (
                             <div key={label} className="bg-white/3 rounded p-2">
                               <div className={`font-mono font-bold ${color}`}>${v.toFixed(2)}</div>
                               <div className="text-white/30 text-[10px]">{label}</div>
                             </div>
                           ))}
+                          <div className="bg-white/3 rounded p-2">
+                            <div className={`font-mono font-bold text-xs ${hasBoardMint ? 'text-green-400' : 'text-white/30'}`}>
+                              {hasBoardMint ? '✓ configured' : '✗ not set'}
+                            </div>
+                            <div className="text-white/30 text-[10px]">$BOARD mint</div>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => runDistributionAction('trigger_close_epoch')}
-                            className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors"
-                          >
-                            Close previous epoch now
+
+                        {!hasBoardMint && (
+                          <p className="text-xs text-purple-400/60">$BOARD mint not configured. Revenue is tracked; holder snapshots require NEXT_PUBLIC_BOARD_MINT.</p>
+                        )}
+
+                        <div className="flex flex-wrap gap-2 pt-1 border-t border-white/5">
+                          <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/60 px-3 py-1.5 rounded transition-colors">
+                            Refresh
                           </button>
-                          <button
-                            onClick={() => runDistributionAction('seed_excluded_wallets')}
-                            className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors"
-                          >
-                            Seed excluded system wallets
+                          <button onClick={runBilling} disabled={billingRunning} className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50">
+                            {billingRunning ? 'Running…' : 'Run Billing'}
+                          </button>
+                          <button onClick={() => runDistributionAction('trigger_close_epoch')} className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors">
+                            Close Yesterday&apos;s Epoch
+                          </button>
+                          <button onClick={() => runDistributionAction('seed_excluded_wallets')} className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors">
+                            Seed Excluded Wallets
+                          </button>
+                          <button onClick={exportEpochsCsv} disabled={distEpochs.length === 0} className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/50 px-3 py-1.5 rounded transition-colors disabled:opacity-40">
+                            Export CSV
                           </button>
                         </div>
                       </div>
                     )
                   })()}
 
-                  {/* Epoch cards */}
+                  {/* Epoch history table */}
                   {distEpochs.length === 0 ? (
                     <p className="text-white/30 text-sm text-center py-8">No epochs yet. The current UTC epoch auto-creates on first billing.</p>
-                  ) : distEpochs.map((ep) => {
-                    const gross = Number(ep.grossPool)
-                    const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
-                    const ed = new Date(ep.epochDate)
-                    const epochDateStr = `${ed.getUTCFullYear()}-${String(ed.getUTCMonth()+1).padStart(2,'0')}-${String(ed.getUTCDate()).padStart(2,'0')} UTC`
-                    const statusColor =
-                      ep.status === 'PUBLISHED' ? 'text-green-400 bg-green-400/10'
-                      : ep.status === 'CLOSED' ? 'text-white/30 bg-white/5'
-                      : ep.status === 'SNAPSHOTTED' ? 'text-blue-400 bg-blue-400/10'
-                      : ep.status === 'BILLED' ? 'text-amber-400 bg-amber-400/10'
-                      : ep.status === 'OPEN' ? 'text-cyan-400 bg-cyan-400/10'
-                      : ep.status === 'PROCESSING' ? 'text-yellow-400 bg-yellow-400/10'
-                      : ep.status === 'FAILED' ? 'text-red-400 bg-red-400/10'
-                      : ep.status === 'READY_NO_TOKEN' ? 'text-purple-400 bg-purple-400/10'
-                      : 'text-white/50 bg-white/5'
-                    return (
-                      <div key={ep.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <div className="text-white font-bold">{epochDateStr}</div>
-                            <div className="text-white/25 text-[10px] font-mono">{ep.id}</div>
-                          </div>
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor}`}>{ep.status}</span>
-                        </div>
-
-                        {/* Revenue breakdown */}
-                        {gross > 0 ? (
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                            {[
-                              { label: 'Ad revenue', v: Number(ep.adRevenue), color: 'text-green-400' },
-                              { label: 'Fee revenue', v: Number(ep.tradingFeeRevenue), color: 'text-blue-400' },
-                              { label: 'Mgmt fee', v: Number(ep.managementFeeAmount), color: 'text-white/50' },
-                              { label: 'Claim pool', v: claimPool, color: 'text-green-400' },
-                            ].map(({ label, v, color }) => (
-                              <div key={label} className="bg-white/3 rounded p-2">
-                                <div className={`font-mono font-bold ${color}`}>${v.toFixed(2)}</div>
-                                <div className="text-white/30 text-[10px]">{label}</div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-white/30 text-xs">No revenue computed yet</div>
-                        )}
-
-                        {ep._count && (
-                          <div className="flex gap-4 text-xs text-white/40">
-                            <span>{ep._count.holderSnapshots} holder snapshots</span>
-                            <span>{ep._count.claims} claims</span>
-                            {ep.snapshotDate && <span>Snapshotted {new Date(ep.snapshotDate).toLocaleDateString()}</span>}
-                          </div>
-                        )}
-
-                        {/* Action buttons per status */}
-                        <div className="flex flex-wrap gap-2 pt-1">
-                          {(ep.status === 'DRAFT' || ep.status === 'OPEN' || ep.status === 'FAILED') && (
-                            <button
-                              onClick={() => runDistributionAction('calculate_pool', { epochId: ep.id })}
-                              className="text-xs bg-white/10 hover:bg-white/20 text-white/70 px-3 py-1 rounded transition-colors"
-                            >
-                              Calculate pool
-                            </button>
-                          )}
-                          {(ep.status === 'BILLED' || ep.status === 'DRAFT' || ep.status === 'OPEN') && (
-                            <button
-                              onClick={() => runRealSnapshot(ep.id)}
-                              disabled={snapshotRunning}
-                              className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1 rounded transition-colors disabled:opacity-50"
-                            >
-                              {snapshotRunning ? 'Snapshotting…' : 'Run holder snapshot'}
-                            </button>
-                          )}
-                          {ep.status === 'SNAPSHOTTED' && (
-                            <button
-                              onClick={() => runDistributionAction('publish_epoch', { epochId: ep.id })}
-                              className="text-xs bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 px-3 py-1 rounded transition-colors"
-                            >
-                              Publish
-                            </button>
-                          )}
-                          {ep.status === 'PUBLISHED' && (
-                            <button
-                              onClick={() => runDistributionAction('close_epoch', { epochId: ep.id })}
-                              className="text-xs bg-white/5 hover:bg-white/10 border border-white/20 text-white/40 px-3 py-1 rounded transition-colors"
-                            >
-                              Close
-                            </button>
-                          )}
-                          {ep.status === 'FAILED' && (
-                            <button
-                              onClick={() => runDistributionAction('trigger_close_epoch', { epochDate: ep.epochDate })}
-                              className="text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 px-3 py-1 rounded transition-colors"
-                            >
-                              Retry close
-                            </button>
-                          )}
-                        </div>
+                  ) : (
+                    <div>
+                      <h3 className="text-xs text-white/40 uppercase tracking-widest mb-3">Epoch History</h3>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
+                              <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Date</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Ad Fees</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Trading Fees</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Gross</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Mgmt %</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Mgmt $</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">To Distribute</th>
+                              <th className="pb-2 text-right font-medium px-2 whitespace-nowrap">Supply</th>
+                              <th className="pb-2 text-center font-medium px-2 whitespace-nowrap">Status</th>
+                              <th className="pb-2 text-right font-medium pl-2 whitespace-nowrap">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {distEpochs.map((ep) => {
+                              const gross = Number(ep.grossPool)
+                              const claimPool = Number(ep.claimPoolAmount || ep.totalPool)
+                              const ed = new Date(ep.epochDate)
+                              const epDateStr = `${ed.getUTCFullYear()}-${String(ed.getUTCMonth()+1).padStart(2,'0')}-${String(ed.getUTCDate()).padStart(2,'0')}`
+                              const epStatusColor =
+                                ep.status === 'PUBLISHED' ? 'text-green-400 bg-green-400/10'
+                                : ep.status === 'CLOSED' ? 'text-white/30 bg-white/5'
+                                : ep.status === 'SNAPSHOTTED' ? 'text-blue-400 bg-blue-400/10'
+                                : ep.status === 'BILLED' ? 'text-amber-400 bg-amber-400/10'
+                                : ep.status === 'OPEN' ? 'text-cyan-400 bg-cyan-400/10'
+                                : ep.status === 'PROCESSING' ? 'text-yellow-400 bg-yellow-400/10'
+                                : ep.status === 'FAILED' ? 'text-red-400 bg-red-400/10'
+                                : ep.status === 'READY_NO_TOKEN' ? 'text-purple-400 bg-purple-400/10'
+                                : 'text-white/50 bg-white/5'
+                              const boardMintSet = !!(process.env.NEXT_PUBLIC_BOARD_MINT ?? '')
+                              return (
+                                <tr key={ep.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
+                                  <td className="py-2 pr-3 text-white font-medium whitespace-nowrap">{epDateStr}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-green-400 whitespace-nowrap">${Number(ep.adRevenue).toFixed(2)}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-blue-400 whitespace-nowrap">${Number(ep.tradingFeeRevenue).toFixed(2)}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-white whitespace-nowrap">{gross > 0 ? `$${gross.toFixed(2)}` : '—'}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-white/50 whitespace-nowrap">{Number(ep.managementFeePercent).toFixed(0)}%</td>
+                                  <td className="py-2 px-2 text-right font-mono text-white/50 whitespace-nowrap">{gross > 0 ? `$${Number(ep.managementFeeAmount).toFixed(2)}` : '—'}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-green-400 whitespace-nowrap">{gross > 0 ? `$${claimPool.toFixed(2)}` : '—'}</td>
+                                  <td className="py-2 px-2 text-right font-mono text-white/40 whitespace-nowrap">{ep.eligibleSupply && Number(ep.eligibleSupply) > 0 ? Number(ep.eligibleSupply).toLocaleString() : '—'}</td>
+                                  <td className="py-2 px-2 text-center whitespace-nowrap">
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${epStatusColor}`}>{ep.status}</span>
+                                  </td>
+                                  <td className="py-2 pl-2 text-right">
+                                    <div className="flex items-center justify-end gap-1 flex-wrap">
+                                      {(ep.status === 'DRAFT' || ep.status === 'OPEN' || ep.status === 'FAILED' || ep.status === 'BILLED') && (
+                                        <button onClick={() => runDistributionAction('calculate_pool', { epochId: ep.id })} className="text-[10px] bg-white/10 hover:bg-white/20 text-white/70 px-2 py-0.5 rounded transition-colors">
+                                          Recalculate
+                                        </button>
+                                      )}
+                                      {(ep.status === 'BILLED' || ep.status === 'DRAFT' || ep.status === 'OPEN') && (
+                                        <button onClick={() => runRealSnapshot(ep.id)} disabled={snapshotRunning || !boardMintSet} title={!boardMintSet ? 'NEXT_PUBLIC_BOARD_MINT not configured' : undefined} className="text-[10px] bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-2 py-0.5 rounded transition-colors disabled:opacity-40">
+                                          {snapshotRunning ? '…' : 'Snapshot'}
+                                        </button>
+                                      )}
+                                      {ep.status === 'SNAPSHOTTED' && (
+                                        <button onClick={() => runDistributionAction('publish_epoch', { epochId: ep.id })} className="text-[10px] bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 px-2 py-0.5 rounded transition-colors">
+                                          Publish
+                                        </button>
+                                      )}
+                                      {ep.status === 'PUBLISHED' && (
+                                        <button onClick={() => runDistributionAction('close_epoch', { epochId: ep.id })} className="text-[10px] bg-white/5 hover:bg-white/10 border border-white/20 text-white/40 px-2 py-0.5 rounded transition-colors">
+                                          Close
+                                        </button>
+                                      )}
+                                      {ep.status === 'FAILED' && (
+                                        <button onClick={() => runDistributionAction('trigger_close_epoch', { epochDate: ep.epochDate })} className="text-[10px] bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 px-2 py-0.5 rounded transition-colors">
+                                          Retry
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
                       </div>
-                    )
-                  })}
+                    </div>
+                  )}
                 </div>
               )}
 
