@@ -3,6 +3,7 @@ import { prisma } from '@/lib/prisma'
 import { env } from '@/lib/env'
 import { settleRevenueEvent } from '@/lib/settlement'
 import { getOrCreateEpoch, utcDayStart } from '@/lib/epoch'
+import { captureAppError } from '@/lib/sentry'
 
 function authorized(req: Request): boolean {
   const secret = env.cronSecret
@@ -115,12 +116,14 @@ export async function GET(req: Request) {
         return { revenueEvent }
       })
 
-      void settleRevenueEvent(revenueEvent.id).catch((err) =>
+      void settleRevenueEvent(revenueEvent.id).catch((err) => {
         console.error('[settlement] recognition error', revenueEvent.id, err)
-      )
+        captureAppError(err, { cronJob: 'recognize-campaign-revenue', revenueEventId: revenueEvent.id, creativeId: campaign.id, status: 'settlement_error' })
+      })
 
       recognitionResults.push({ creativeId: campaign.id, status: 'RECOGNIZED', ok: true, amount: amountToRecognize })
     } catch (err) {
+      captureAppError(err, { cronJob: 'recognize-campaign-revenue', creativeId: campaign.id, status: 'ERROR' })
       recognitionResults.push({
         creativeId: campaign.id,
         status: 'ERROR',
@@ -263,9 +266,10 @@ export async function GET(req: Request) {
           return revenueEvent
         })
 
-        void settleRevenueEvent(revenueEvent.id).catch((err) =>
+        void settleRevenueEvent(revenueEvent.id).catch((err) => {
           console.error('[settlement] renewal error', revenueEvent.id, err)
-        )
+          captureAppError(err, { cronJob: 'recognize-campaign-revenue', revenueEventId: revenueEvent.id, creativeId: campaign.id, status: 'renewal_settlement_error' })
+        })
 
         renewalResults.push({ creativeId: campaign.id, status: 'RENEWED', ok: true })
       } else {
@@ -286,6 +290,7 @@ export async function GET(req: Request) {
         renewalResults.push({ creativeId: campaign.id, status: 'EXPIRED_NO_AUTORENEW', ok: true })
       }
     } catch (err) {
+      captureAppError(err, { cronJob: 'recognize-campaign-revenue', creativeId: campaign.id, status: 'RENEWAL_ERROR' })
       renewalResults.push({
         creativeId: campaign.id,
         status: 'ERROR',

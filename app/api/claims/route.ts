@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getSession } from '@/lib/auth'
 import { getPayoutReadiness, executePayout } from '@/lib/payout'
+import { captureAppError } from '@/lib/sentry'
 
 async function isEpochDistributionFunded(epochId: string): Promise<boolean> {
   const settled = await prisma.revenueSettlement.findFirst({
@@ -165,6 +166,9 @@ export async function POST(req: Request) {
     }
 
     const result = await executePayout(existingClaim.id, wallet)
+    if (!result.ok && result.error) {
+      captureAppError(new Error(result.error), { route: '/api/claims', claimId: existingClaim.id, epochId, status: 'FAILED' })
+    }
     const finalClaim = await prisma.claim.findUnique({ where: { id: existingClaim.id } })
     return NextResponse.json({
       ok: result.ok,
@@ -209,6 +213,9 @@ export async function POST(req: Request) {
   }
 
   const result = await executePayout(claim.id, wallet)
+  if (!result.ok && result.error) {
+    captureAppError(new Error(result.error), { route: '/api/claims', claimId: claim.id, epochId, status: 'FAILED' })
+  }
   const finalClaim = await prisma.claim.findUnique({ where: { id: claim.id } })
   return NextResponse.json({
     ok: result.ok,

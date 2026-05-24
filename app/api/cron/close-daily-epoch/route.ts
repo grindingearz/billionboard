@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
 import { yesterdayUtc, closeEpochForDate } from '@/lib/epoch'
+import { captureAppError } from '@/lib/sentry'
 
 // GET /api/cron/close-daily-epoch — Vercel cron invokes via GET
 export async function GET(req: Request) {
@@ -41,6 +42,7 @@ async function runCloseEpoch(req: Request): Promise<Response> {
     return NextResponse.json({ ok: true, epoch })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
+    captureAppError(err, { cronJob: 'close-daily-epoch', route: '/api/cron/close-daily-epoch', status: 'ERROR' })
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }

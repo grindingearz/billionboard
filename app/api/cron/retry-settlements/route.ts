@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { env } from '@/lib/env'
 import { settleRevenueEvent } from '@/lib/settlement'
+import { captureAppError } from '@/lib/sentry'
 
 function authorized(req: Request): boolean {
   const secret = env.cronSecret
@@ -50,6 +51,13 @@ export async function GET(req: Request) {
         error: result.error,
       })
     } catch (err) {
+      captureAppError(err, {
+        cronJob: 'retry-settlements',
+        settlementId: record.id,
+        revenueEventId: record.revenueEventId,
+        status: 'ERROR',
+        retryCount: record.retryCount,
+      })
       results.push({
         settlementId: record.id,
         revenueEventId: record.revenueEventId,

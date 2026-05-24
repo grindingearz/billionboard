@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { env } from '@/lib/env'
 import { processUsdcTransfer, expireStaleTopups, USDC_MINT, getDepositWallet } from '@/lib/usdc-topup'
+import { captureAppError } from '@/lib/sentry'
 
 function authorized(req: Request): boolean {
   const secret = env.cronSecret
@@ -143,6 +144,14 @@ async function runReconcile(req: Request): Promise<Response> {
     } catch (e) {
       errors.push(`Sender scan error (topup ${topup.id.slice(0, 8)}): ${e instanceof Error ? e.message : String(e)}`)
     }
+  }
+
+  if (errors.length > 0) {
+    captureAppError(new Error(`reconcile-usdc-topups: ${errors.length} error(s)`), {
+      cronJob: 'reconcile-usdc-topups',
+      route: '/api/cron/reconcile-usdc-topups',
+      extra: { errorCount: errors.length, firstError: errors[0] },
+    })
   }
 
   return NextResponse.json({

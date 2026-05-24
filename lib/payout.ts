@@ -10,6 +10,7 @@ import { getOrCreateAssociatedTokenAccount, transferChecked } from '@solana/spl-
 import { prisma } from './prisma'
 import { env } from './env'
 import { parseKeypair } from './wallet-key-check'
+import { captureAppError } from './sentry'
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDC_DECIMALS = 6
@@ -92,6 +93,7 @@ export async function executePayout(claimId: string, recipientWallet: string): P
   } catch (err) {
     const msg = `Failed to parse distribution key: ${err instanceof Error ? err.message : String(err)}`
     await prisma.claim.update({ where: { id: claimId }, data: { status: 'FAILED', error: msg } })
+    captureAppError(err, { route: 'payout', claimId, status: 'FAILED' })
     return { ok: false, error: msg }
   }
 
@@ -99,6 +101,7 @@ export async function executePayout(claimId: string, recipientWallet: string): P
   if (distKeypair.publicKey.toBase58() !== distWallet) {
     const msg = 'CRITICAL: distribution wallet key mismatch — payouts disabled for safety'
     await prisma.claim.update({ where: { id: claimId }, data: { status: 'FAILED', error: msg } })
+    captureAppError(new Error(msg), { route: 'payout', claimId, status: 'FAILED' })
     return { ok: false, error: msg }
   }
 
@@ -158,6 +161,7 @@ export async function executePayout(claimId: string, recipientWallet: string): P
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await prisma.claim.update({ where: { id: claimId }, data: { status: 'FAILED', error: msg } })
+    captureAppError(err, { route: 'payout', claimId, status: 'FAILED' })
     return { ok: false, error: msg }
   }
 }

@@ -6,6 +6,7 @@ import { getTilePrice, isFreeRentalEnabled, isAutoApproveEnabled } from '@/lib/s
 import { settleRevenueEvent } from '@/lib/settlement'
 import { getOrCreateEpoch, utcDayStart } from '@/lib/epoch'
 import { validateCampaignPrice, computeCampaignPrice, type DurationType } from '@/lib/campaign-pricing'
+import { captureAppError } from '@/lib/sentry'
 
 // Strips any existing protocol and ensures https:// prefix.
 function normalizeDestUrl(raw: string): string {
@@ -210,9 +211,10 @@ export async function POST(req: Request) {
   })
 
   if (result.revenueEvent) {
-    void settleRevenueEvent(result.revenueEvent.id).catch((err) =>
+    void settleRevenueEvent(result.revenueEvent.id).catch((err) => {
       console.error('[settlement] activation error', result.revenueEvent?.id, err)
-    )
+      captureAppError(err, { route: '/api/rentals', revenueEventId: result.revenueEvent?.id, status: 'settlement_error' })
+    })
   }
 
   return NextResponse.json(
@@ -345,9 +347,10 @@ async function handleCampaignRental(
     return { creative, rentals, revenueEvent }
   })
 
-  void settleRevenueEvent(result.revenueEvent.id).catch((err) =>
+  void settleRevenueEvent(result.revenueEvent.id).catch((err) => {
     console.error('[settlement] campaign activation error', result.revenueEvent.id, err)
-  )
+    captureAppError(err, { route: '/api/rentals', revenueEventId: result.revenueEvent.id, creativeId: result.creative.id, status: 'campaign_settlement_error' })
+  })
 
   return NextResponse.json(
     {

@@ -19,6 +19,7 @@ import { env } from './env'
 import { getSetting } from './settings'
 import { parseKeypair } from './wallet-key-check'
 import { Prisma } from '@/app/generated/prisma/client'
+import { captureAppError } from './sentry'
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDC_DECIMALS = 6
@@ -190,25 +191,28 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
       where: { id: settlement.id },
       data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
     })
+    captureAppError(err, { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'FAILED' })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
 
   // Critical: verify signer public keys match expected wallets — never retryable
   if (sourceKeypair.publicKey.toBase58() !== sourceWallet) {
-    const errorMsg = `CRITICAL: source wallet key mismatch. Key is ${sourceKeypair.publicKey.toBase58()}, expected ${sourceWallet}. Settlement disabled.`
+    const errorMsg = `CRITICAL: source wallet key mismatch. Settlement disabled.`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
+      data: { settlementStatus: 'FAILED', settlementError: `CRITICAL: source wallet key mismatch. Key is ${sourceKeypair.publicKey.toBase58()}, expected ${sourceWallet}. Settlement disabled.`, retryable: false, nextRetryAt: null },
     })
+    captureAppError(new Error(errorMsg), { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'FAILED' })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
 
   if (revenueKeypair.publicKey.toBase58() !== revenueWallet) {
-    const errorMsg = `CRITICAL: revenue wallet key mismatch. Key is ${revenueKeypair.publicKey.toBase58()}, expected ${revenueWallet}. Settlement disabled.`
+    const errorMsg = `CRITICAL: revenue wallet key mismatch. Settlement disabled.`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
+      data: { settlementStatus: 'FAILED', settlementError: `CRITICAL: revenue wallet key mismatch. Key is ${revenueKeypair.publicKey.toBase58()}, expected ${revenueWallet}. Settlement disabled.`, retryable: false, nextRetryAt: null },
     })
+    captureAppError(new Error(errorMsg), { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'FAILED' })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
 
@@ -273,6 +277,7 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
           lastRetryAt: new Date(), nextRetryAt,
         },
       })
+      captureAppError(err, { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'FAILED', retryCount: settlement.retryCount })
       return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
     }
   }
@@ -323,6 +328,7 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
           lastRetryAt: new Date(), nextRetryAt,
         },
       })
+      captureAppError(err, { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'PARTIAL', retryCount: settlement.retryCount })
       return { ok: false, settlementId: settlement.id, status: 'PARTIAL', error: errorMsg, moveToRevenueTx }
     }
   }
@@ -359,6 +365,7 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
           lastRetryAt: new Date(), nextRetryAt,
         },
       })
+      captureAppError(err, { route: 'settlement', settlementId: settlement.id, revenueEventId, status: 'PARTIAL', retryCount: settlement.retryCount })
       return {
         ok: false, settlementId: settlement.id, status: 'PARTIAL', error: errorMsg,
         moveToRevenueTx, treasuryTx,

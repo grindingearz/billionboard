@@ -11,6 +11,7 @@ import { settleRevenueEvent, dryRunSettlement } from '@/lib/settlement'
 import { fetchWalletUsdcBalances } from '@/lib/wallet-balances'
 import { checkKeyDiagnostic } from '@/lib/wallet-key-check'
 import { getPayoutReadiness } from '@/lib/payout'
+import { captureAppError } from '@/lib/sentry'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -848,9 +849,10 @@ export async function POST(req: Request) {
     })
 
     if (revenueEvent) {
-      void settleRevenueEvent(revenueEvent.id).catch((err) =>
+      void settleRevenueEvent(revenueEvent.id).catch((err) => {
         console.error('[settlement] approve_order error', revenueEvent.id, err)
-      )
+        captureAppError(err, { route: '/api/admin', revenueEventId: revenueEvent.id, status: 'approve_order_settlement_error' })
+      })
     }
 
     return NextResponse.json({ ok: true })
@@ -944,9 +946,10 @@ export async function POST(req: Request) {
 
     // Fire-and-forget settlements
     for (const id of revenueEventIds) {
-      void settleRevenueEvent(id).catch((err) =>
+      void settleRevenueEvent(id).catch((err) => {
         console.error('[settlement] approve_all error', id, err)
-      )
+        captureAppError(err, { route: '/api/admin', revenueEventId: id, status: 'approve_all_settlement_error' })
+      })
     }
 
     return NextResponse.json({ ok: true, count: totalCount, skipped: skippedCount })
@@ -988,6 +991,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, epoch })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error'
+      captureAppError(err, { route: '/api/admin', status: 'trigger_close_epoch_error' })
       return NextResponse.json({ error: message }, { status: 500 })
     }
   }

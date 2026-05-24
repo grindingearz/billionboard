@@ -4,6 +4,7 @@ import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
 import { utcDayStart, getOrCreateEpoch } from '@/lib/epoch'
 import { settleRevenueEvent } from '@/lib/settlement'
+import { captureAppError } from '@/lib/sentry'
 
 // GET /api/billing — Vercel cron invokes via GET; delegates to runBilling
 export async function GET(req: Request) {
@@ -186,9 +187,10 @@ async function runBilling(req: Request): Promise<Response> {
       select: { id: true },
     })
     for (const ev of createdEvents) {
-      void settleRevenueEvent(ev.id).catch((err) =>
+      void settleRevenueEvent(ev.id).catch((err) => {
         console.error('[settlement] billing error', ev.id, err)
-      )
+        captureAppError(err, { cronJob: 'billing', revenueEventId: ev.id, route: '/api/billing', status: 'settlement_error' })
+      })
     }
   }
 
