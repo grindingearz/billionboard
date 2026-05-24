@@ -6,6 +6,16 @@ import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
 type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution' | 'users' | 'accounting' | 'settlements'
 
+interface KeyDiagnostic {
+  present: boolean
+  parseStatus: 'ok' | 'parse_error' | 'missing'
+  derivedPubkey: string | null
+  derivedPubkeyFull: string | null
+  expectedPubkey: string | null
+  matches: boolean | null
+  error: string | null
+}
+
 interface ResetState {
   userId: string | null
   balance: number
@@ -156,6 +166,9 @@ interface AccountingData {
     topupWalletKeyConfigured: boolean
     revenueWalletKeyConfigured: boolean
     feeCreatorWalletKeyConfigured: boolean
+    topupKeyDiag: KeyDiagnostic
+    revenueKeyDiag: KeyDiagnostic
+    feeCreatorKeyDiag: KeyDiagnostic
   }
   reconciliation: {
     confirmedOnChainTopups: number
@@ -2419,34 +2432,85 @@ export default function AdminPage() {
                   {/* Wallet config status */}
                   <div className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
                     <h3 className="text-xs font-bold text-white/50 uppercase tracking-widest">Wallet Configuration</h3>
+
+                    {/* Address-only wallets */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                       {[
-                        { label: 'Top-Up Wallet', addr: accountingData.walletConfig.topupWallet, keyOk: accountingData.walletConfig.topupWalletKeyConfigured },
-                        { label: 'Revenue Wallet', addr: accountingData.walletConfig.revenueWallet, keyOk: accountingData.walletConfig.revenueWalletKeyConfigured },
-                        { label: 'Fee Creator Wallet', addr: accountingData.walletConfig.feeCreatorWallet, keyOk: accountingData.walletConfig.feeCreatorWalletKeyConfigured },
-                        { label: 'Treasury Wallet', addr: accountingData.walletConfig.treasuryWallet, keyOk: null },
-                        { label: 'Distribution Wallet', addr: accountingData.walletConfig.distributionWallet, keyOk: null },
-                        { label: 'Admin Wallet', addr: accountingData.walletConfig.adminWallet, keyOk: null },
-                      ].map(({ label, addr, keyOk }) => (
+                        { label: 'Treasury Wallet', addr: accountingData.walletConfig.treasuryWallet },
+                        { label: 'Distribution Wallet', addr: accountingData.walletConfig.distributionWallet },
+                        { label: 'Admin Wallet', addr: accountingData.walletConfig.adminWallet },
+                      ].map(({ label, addr }) => (
                         <div key={label} className="flex items-center justify-between gap-2 bg-white/3 rounded px-3 py-1.5">
-                          <span className="text-white/50">{label}</span>
-                          <div className="flex items-center gap-2 flex-shrink-0">
-                            {keyOk !== null && (
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${keyOk ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                                {keyOk ? 'key ✓' : 'no key'}
-                              </span>
-                            )}
-                            <span className={`font-mono text-[10px] ${addr ? 'text-white/60' : 'text-red-400/60'}`}>
-                              {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : 'not set'}
-                            </span>
-                          </div>
+                          <span className="text-white/40">{label}</span>
+                          <span className={`font-mono text-[10px] ${addr ? 'text-white/50' : 'text-red-400/50'}`}>
+                            {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : 'not set'}
+                          </span>
                         </div>
                       ))}
                     </div>
+
+                    {/* Signer wallets with key diagnostics */}
+                    <div className="space-y-2 text-xs">
+                      {([
+                        { label: 'Top-Up Wallet', addr: accountingData.walletConfig.topupWallet, diag: accountingData.walletConfig.topupKeyDiag },
+                        { label: 'Revenue Wallet', addr: accountingData.walletConfig.revenueWallet, diag: accountingData.walletConfig.revenueKeyDiag },
+                        { label: 'Fee Creator Wallet', addr: accountingData.walletConfig.feeCreatorWallet, diag: accountingData.walletConfig.feeCreatorKeyDiag },
+                      ] as { label: string; addr: string | null; diag: KeyDiagnostic }[]).map(({ label, addr, diag }) => {
+                        const parseOk = diag.parseStatus === 'ok'
+                        const parseErr = diag.parseStatus === 'parse_error'
+                        const missing = diag.parseStatus === 'missing'
+                        return (
+                          <div key={label} className="bg-white/3 rounded px-3 py-2 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <span className="text-white/50">{label}</span>
+                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                {/* Key present badge */}
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded ${diag.present ? 'bg-white/10 text-white/50' : 'bg-amber-500/15 text-amber-400/70'}`}>
+                                  {diag.present ? 'key set' : 'no key'}
+                                </span>
+                                {/* Parse status */}
+                                {diag.present && (
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${parseOk ? 'bg-green-500/15 text-green-400' : parseErr ? 'bg-red-500/20 text-red-400' : ''}`}>
+                                    {parseOk ? 'parse ✓' : parseErr ? 'parse ✗' : ''}
+                                  </span>
+                                )}
+                                {/* Match status */}
+                                {parseOk && diag.matches !== null && (
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${diag.matches ? 'bg-green-500/20 text-green-400' : 'bg-red-500/25 text-red-400 font-bold'}`}>
+                                    {diag.matches ? 'match ✓' : 'MISMATCH ✗'}
+                                  </span>
+                                )}
+                                {/* Address */}
+                                <span className={`font-mono text-[10px] ${addr ? 'text-white/50' : 'text-red-400/50'}`}>
+                                  {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : 'not set'}
+                                </span>
+                              </div>
+                            </div>
+                            {/* Derived pubkey (if key parses and no mismatch) */}
+                            {parseOk && diag.derivedPubkey && !missing && (
+                              <div className="flex items-center gap-2 text-[10px] text-white/30">
+                                <span>Derived:</span>
+                                <span className="font-mono">{diag.derivedPubkey}</span>
+                                <span className="text-white/15">→</span>
+                                <span>Expected:</span>
+                                <span className="font-mono">{diag.expectedPubkey ?? '—'}</span>
+                              </div>
+                            )}
+                            {/* Error message */}
+                            {diag.error && (
+                              <div className={`text-[10px] leading-snug rounded px-2 py-1.5 ${diag.matches === false ? 'bg-red-500/10 text-red-400/80 border border-red-500/20' : 'bg-amber-500/10 text-amber-400/80 border border-amber-500/15'}`}>
+                                {diag.error}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+
                     {(!accountingData.walletConfig.topupWalletKeyConfigured || !accountingData.walletConfig.revenueWalletKeyConfigured) && (
                       <p className="text-amber-400/60 text-[10px]">
                         Settlement private keys not configured — automated on-chain transfers are disabled.
-                        Revenue events are tracked; set TOPUP_WALLET_PRIVATE_KEY and REVENUE_WALLET_PRIVATE_KEY to enable.
+                        Set TOPUP_WALLET_PRIVATE_KEY and REVENUE_WALLET_PRIVATE_KEY to enable. Phantom base58 exports are supported.
                       </p>
                     )}
                   </div>

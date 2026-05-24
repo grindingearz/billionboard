@@ -9,6 +9,7 @@ import { getOrCreateEpoch, todayUtc, msUntilUtcClose, closeEpochForDate, yesterd
 import { verifyAndProcessSignature } from '@/lib/usdc-topup'
 import { settleRevenueEvent, dryRunSettlement } from '@/lib/settlement'
 import { fetchWalletUsdcBalances } from '@/lib/wallet-balances'
+import { checkKeyDiagnostic } from '@/lib/wallet-key-check'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -453,6 +454,10 @@ export async function GET(req: Request) {
       getSetting('management_fee_percent'),
     ])
 
+    const topupKeyDiag = checkKeyDiagnostic(env.topupWalletPrivateKey, env.topupWallet)
+    const revenueKeyDiag = checkKeyDiagnostic(env.revenueWalletPrivateKey, env.revenueWallet)
+    const feeCreatorKeyDiag = checkKeyDiagnostic(env.feeCreatorWalletPrivateKey, env.feeCreatorWallet)
+
     const walletConfig = {
       topupWallet: env.topupWallet,
       revenueWallet: env.revenueWallet,
@@ -463,6 +468,9 @@ export async function GET(req: Request) {
       topupWalletKeyConfigured: !!env.topupWalletPrivateKey,
       revenueWalletKeyConfigured: !!env.revenueWalletPrivateKey,
       feeCreatorWalletKeyConfigured: !!env.feeCreatorWalletPrivateKey,
+      topupKeyDiag,
+      revenueKeyDiag,
+      feeCreatorKeyDiag,
     }
 
     // Fetch on-chain USDC balance for top-up wallet (for reconciliation)

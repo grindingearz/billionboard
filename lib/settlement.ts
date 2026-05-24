@@ -17,6 +17,7 @@ import {
 import { prisma } from './prisma'
 import { env } from './env'
 import { getSetting } from './settings'
+import { parseKeypair } from './wallet-key-check'
 import { Prisma } from '@/app/generated/prisma/client'
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -30,15 +31,6 @@ export type SettlementResult = {
   moveToRevenueTx?: string | null
   treasuryTx?: string | null
   distributionTx?: string | null
-}
-
-/** Parse a private key from JSON array "[1,2,…]" or base64 string. */
-function parseKeypair(raw: string): Keypair {
-  const trimmed = raw.trim()
-  if (trimmed.startsWith('[')) {
-    return Keypair.fromSecretKey(new Uint8Array(JSON.parse(trimmed) as number[]))
-  }
-  return Keypair.fromSecretKey(Buffer.from(trimmed, 'base64'))
 }
 
 /**

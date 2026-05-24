@@ -12,7 +12,8 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "check:wallet-keys": "node scripts/check-wallet-keys.js"
   },
   "prisma": {
     "seed": "npx tsx prisma/seed.ts"
