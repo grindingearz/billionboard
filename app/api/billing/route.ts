@@ -32,11 +32,15 @@ export async function POST(req: Request) {
 
   const now = new Date()
 
-  // Only bill ACTIVE rentals where nextBillingAt is due
+  // Only bill ACTIVE rentals where nextBillingAt is due.
+  // Exclude duration-campaign rentals — those are billed via recognize-campaign-revenue cron.
   const activeRentals = await prisma.adRental.findMany({
     where: {
       status: 'ACTIVE',
-      OR: [{ nextBillingAt: null }, { nextBillingAt: { lte: now } }],
+      AND: [
+        { OR: [{ nextBillingAt: null }, { nextBillingAt: { lte: now } }] },
+        { OR: [{ creative: null }, { creative: { durationType: null } }] },
+      ],
     },
     include: { user: { include: { advertiserWallet: true } } },
   })

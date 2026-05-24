@@ -75,6 +75,12 @@ enum DisplayMode {
   STRETCH
 }
 
+enum DurationType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
 model AdCreative {
   id          String      @id @default(cuid())
   userId      String
@@ -82,11 +88,39 @@ model AdCreative {
   destUrl     String
   altText     String?
   displayMode DisplayMode @default(REPEAT)
+  // Campaign fields (null = legacy per-day billing)
+  durationType            DurationType?
+  durationDays            Int?
+  totalPrice              Decimal?      @db.Decimal(10, 2)
+  prepaidAmount           Decimal?      @db.Decimal(10, 2)
+  recognizedAmount        Decimal?      @db.Decimal(10, 2)
+  dailyRecognizedRevenue  Decimal?      @db.Decimal(10, 2)
+  campaignStartAt         DateTime?
+  campaignEndAt           DateTime?
+  lastRecognizedAt        DateTime?
+  nextRecognitionAt       DateTime?
+  campaignStatus          String?       // 'ACTIVE' | 'COMPLETED' | 'EXPIRED'
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  user      User       @relation(fields: [userId], references: [id])
-  adRentals AdRental[]
+  user                        User                        @relation(fields: [userId], references: [id])
+  adRentals                   AdRental[]
+  campaignRevenueRecognitions CampaignRevenueRecognition[]
+}
+
+model CampaignRevenueRecognition {
+  id                    String   @id @default(cuid())
+  creativeId            String
+  recognitionPeriodStart DateTime @db.Date
+  recognitionPeriodEnd  DateTime @db.Date
+  amount                Decimal  @db.Decimal(10, 2)
+  revenueEventId        String?
+  createdAt             DateTime @default(now())
+
+  creative AdCreative @relation(fields: [creativeId], references: [id])
+
+  @@unique([creativeId, recognitionPeriodStart])
+  @@index([creativeId])
 }
 
 model Topup {

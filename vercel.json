@@ -1,6 +1,7 @@
 {
   "framework": "nextjs",
   "crons": [
-    { "path": "/api/cron/reconcile-usdc-topups", "schedule": "0 0 * * *" }
+    { "path": "/api/cron/reconcile-usdc-topups", "schedule": "0 0 * * *" },
+    { "path": "/api/cron/recognize-campaign-revenue", "schedule": "5 0 * * *" }
   ]
 }

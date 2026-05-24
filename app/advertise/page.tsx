@@ -10,6 +10,8 @@ import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
 import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection, runRectangularSelectionTests, canAffordCents, shortfallCents as balanceShortfallCents, runBalancePrecisionTests } from '@/lib/types'
 import type { TileInfoMap, DisplayMode } from '@/lib/types'
+import { CAMPAIGN_PACKAGES, computeCampaignPrice } from '@/lib/campaign-pricing'
+import type { DurationType } from '@/lib/campaign-pricing'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
 type Step = 'select' | 'creative' | 'review' | 'submitted'
@@ -52,6 +54,7 @@ export default function AdvertisePage() {
   const [copied, setCopied] = useState(false)
   const [form, setForm] = useState({ imageUrl: '', destUrl: '', altText: '' })
   const [displayMode, setDisplayMode] = useState<DisplayMode>('REPEAT')
+  const [durationType, setDurationType] = useState<DurationType>('DAILY')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [uploadError, setUploadError] = useState('')
@@ -539,6 +542,8 @@ export default function AdvertisePage() {
         destUrl: fullDestUrl,
         altText: form.altText,
         displayMode,
+        durationType,
+        totalPrice: campaignTotal,
       }),
     })
     const data = await res.json()
@@ -552,8 +557,11 @@ export default function AdvertisePage() {
     setSubmitting(false)
   }
 
-  const cost = selectedTiles.size * tilePrice
-  const canAfford = freeRental.enabled || (balance !== null && canAffordCents(balance, cost))
+  const campaignPricing = computeCampaignPrice(durationType, selectedTiles.size)
+  const campaignTotal = campaignPricing.totalPrice
+  const campaignDailyRevenue = campaignPricing.dailyRecognizedRevenue
+  const campaignDays = campaignPricing.durationDays
+  const canAfford = freeRental.enabled || (balance !== null && canAffordCents(balance, campaignTotal))
 
   const blockInfo = useMemo(() => {
     if (selectedTiles.size === 0) return null
@@ -603,7 +611,7 @@ export default function AdvertisePage() {
           </h2>
           <p className="text-white/50 text-sm mb-6">
             {submittedAutoApproved
-              ? 'Your ad is live and will appear on the board shortly. Billing starts today.'
+              ? `Your ad is live and will appear on the board shortly. Your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}.`
               : 'Your ad is pending admin approval. You\'ll see it go live on the board once approved.'}
           </p>
           <button
@@ -612,6 +620,7 @@ export default function AdvertisePage() {
               setSelectedTiles(new Set())
               setForm({ imageUrl: '', destUrl: '', altText: '' })
               setDisplayMode('REPEAT')
+              setDurationType('DAILY')
               setUploadError('')
               setUrlError('')
               setDisplayModeError('')
@@ -656,7 +665,11 @@ export default function AdvertisePage() {
             <span className="text-white font-bold">{selectedTiles.size}</span> tiles
             selected&nbsp;·&nbsp;
             <span className={canAfford ? 'text-green-400' : 'text-red-400'}>
-              {freeRental.enabled ? '$0 (free)' : `$${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}
+              {freeRental.enabled
+                ? '$0 (free)'
+                : selectedTiles.size === 0
+                  ? `$${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)}/tile`
+                  : `$${campaignTotal.toFixed(2)} total`}
             </span>
           </div>
         </div>
@@ -990,9 +1003,7 @@ export default function AdvertisePage() {
                 </span>
                 <span className="text-white/30 mx-1.5">·</span>
                 <span className="text-green-400">
-                  {freeRental.enabled
-                    ? 'Free'
-                    : `$${(selectedTiles.size * tilePrice) % 1 === 0 ? selectedTiles.size * tilePrice : (selectedTiles.size * tilePrice).toFixed(2)}/day`}
+                  {freeRental.enabled ? 'Free' : `$${campaignTotal.toFixed(2)} total`}
                 </span>
               </div>
             )}
@@ -1003,9 +1014,7 @@ export default function AdvertisePage() {
                 <span className="text-white/60 font-mono">{selectedTiles.size} tiles</span>
                 <span className="text-white/30 mx-1.5">·</span>
                 <span className="text-green-400">
-                  {freeRental.enabled
-                    ? 'Free'
-                    : `$${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}
+                  {freeRental.enabled ? 'Free' : `$${campaignTotal.toFixed(2)} total`}
                 </span>
               </div>
             )}
@@ -1026,7 +1035,7 @@ export default function AdvertisePage() {
               className="bg-green-400 hover:bg-green-300 disabled:opacity-40 disabled:cursor-not-allowed text-black font-bold px-5 py-2.5 rounded-xl text-sm transition-colors shadow-lg shadow-green-400/20"
             >
               Next: Upload Creative ({selectedTiles.size} tile{selectedTiles.size !== 1 ? 's' : ''}
-              {freeRental.enabled ? ' — Free' : ` — $${cost % 1 === 0 ? cost : cost.toFixed(2)}/day`}) →
+              {freeRental.enabled ? ' — Free' : ` — $${campaignTotal.toFixed(2)} total`}) →
             </button>
           </div>
         </div>
@@ -1037,6 +1046,49 @@ export default function AdvertisePage() {
         <div className="flex-1 overflow-auto min-h-0">
           <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
             <h2 className="text-lg font-bold text-white">Your Ad Creative</h2>
+
+            {/* Duration selector */}
+            {!freeRental.enabled && (
+              <div>
+                <label className="block text-xs text-white/50 uppercase tracking-widest mb-2">
+                  Campaign Duration
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(Object.entries(CAMPAIGN_PACKAGES) as [DurationType, typeof CAMPAIGN_PACKAGES[DurationType]][]).map(([key, pkg]) => {
+                    const total = selectedTiles.size > 0 ? (selectedTiles.size * pkg.totalPerTile).toFixed(2) : `$${pkg.totalPerTile.toFixed(2)}/tile`
+                    const isSelected = durationType === key
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setDurationType(key)}
+                        className={`p-3 rounded-xl border text-left transition-colors ${
+                          isSelected
+                            ? 'border-green-400 bg-green-400/10'
+                            : 'border-white/10 bg-white/5 hover:border-white/20'
+                        }`}
+                      >
+                        <div className="text-sm font-bold text-white">{key === 'DAILY' ? 'Daily' : key === 'WEEKLY' ? 'Weekly' : 'Monthly'}</div>
+                        <div className="text-xs text-white/40 mt-0.5">{pkg.days} day{pkg.days > 1 ? 's' : ''}</div>
+                        <div className={`text-xs font-mono mt-1 ${isSelected ? 'text-green-400' : 'text-white/60'}`}>
+                          {selectedTiles.size > 0 ? `$${total}` : `$${pkg.totalPerTile.toFixed(2)}/tile`}
+                        </div>
+                        {pkg.days > 1 && (
+                          <div className="text-[10px] text-white/30 mt-0.5">
+                            ${pkg.dailyPerTile.toFixed(2)}/tile/day
+                          </div>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+                {selectedTiles.size > 0 && (
+                  <p className="text-xs text-white/40 mt-2">
+                    {selectedTiles.size} tiles × ${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)} = <span className="text-green-400 font-mono">${campaignTotal.toFixed(2)} total</span> deducted upfront · ${campaignDailyRevenue.toFixed(2)}/day recognized over {campaignDays} day{campaignDays > 1 ? 's' : ''}
+                  </p>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="block text-xs text-white/50 uppercase tracking-widest mb-1.5">
@@ -1186,14 +1238,36 @@ export default function AdvertisePage() {
                 <span className="text-white/50">Tiles selected</span>
                 <span className="text-white font-mono">{selectedTiles.size}</span>
               </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-white/50">Daily rate</span>
-                <span className="text-white font-mono">
-                  {freeRental.enabled
-                    ? `$0 (${freeRental.days}d free)`
-                    : `$${cost % 1 === 0 ? cost : cost.toFixed(2)} USDC/day`}
-                </span>
-              </div>
+              {!freeRental.enabled && (
+                <>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-white/50">Package</span>
+                    <span className="text-white font-mono">
+                      {durationType === 'DAILY' ? 'Daily' : durationType === 'WEEKLY' ? 'Weekly' : 'Monthly'} ({campaignDays} day{campaignDays > 1 ? 's' : ''})
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-white/50">Total (charged upfront)</span>
+                    <span className="text-green-400 font-mono font-bold">${campaignTotal.toFixed(2)} USDC</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-white/50">Daily recognition</span>
+                    <span className="text-white/60 font-mono">${campaignDailyRevenue.toFixed(2)}/day</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-white/50">Campaign ends</span>
+                    <span className="text-white/60 font-mono">
+                      {new Date(Date.now() + campaignDays * 86400000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </span>
+                  </div>
+                </>
+              )}
+              {freeRental.enabled && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-white/50">Cost</span>
+                  <span className="text-green-400 font-mono">$0 ({freeRental.days}d free)</span>
+                </div>
+              )}
               <div className="flex justify-between text-sm">
                 <span className="text-white/50">Your balance</span>
                 <span className={`font-mono ${canAfford ? 'text-green-400' : 'text-red-400'}`}>
@@ -1216,7 +1290,7 @@ export default function AdvertisePage() {
 
             {!canAfford && !freeRental.enabled && (
               <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-                Insufficient balance. Top up at least ${(balanceShortfallCents(balance ?? 0, cost) / 100).toFixed(2)} USDC.
+                Insufficient balance. Top up at least ${(balanceShortfallCents(balance ?? 0, campaignTotal) / 100).toFixed(2)} USDC.
               </div>
             )}
 
@@ -1239,9 +1313,11 @@ export default function AdvertisePage() {
             )}
 
             <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3">
-              {autoApproveEnabled
-                ? 'Your ad goes live immediately. Balance is deducted daily — if it runs out, your tiles are released.'
-                : 'Your ad will be reviewed before going live. Billing starts on approval. Balance is deducted daily — if it runs out, your tiles are released.'}
+              {freeRental.enabled
+                ? 'Your ad goes live immediately. No charge.'
+                : autoApproveEnabled
+                  ? `Your ad goes live immediately. $${campaignTotal.toFixed(2)} is deducted upfront and your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}. Revenue is recognized daily.`
+                  : `Your ad will be reviewed before going live. $${campaignTotal.toFixed(2)} will be deducted on approval and your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}.`}
             </div>
 
             <div className="flex gap-3">

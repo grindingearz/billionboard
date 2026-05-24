@@ -5,6 +5,7 @@ import { TOTAL_TILES, isRectangularSelection } from '@/lib/types'
 import { getTilePrice, isFreeRentalEnabled, isAutoApproveEnabled } from '@/lib/settings'
 import { settleRevenueEvent } from '@/lib/settlement'
 import { getOrCreateEpoch, utcDayStart } from '@/lib/epoch'
+import { validateCampaignPrice, computeCampaignPrice, type DurationType } from '@/lib/campaign-pricing'
 
 // Strips any existing protocol and ensures https:// prefix.
 function normalizeDestUrl(raw: string): string {
@@ -31,7 +32,15 @@ export async function POST(req: Request) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
 
-  const { tileIds, imageUrl, destUrl, altText, displayMode: rawDisplayMode } = await req.json()
+  const {
+    tileIds,
+    imageUrl,
+    destUrl,
+    altText,
+    displayMode: rawDisplayMode,
+    durationType,
+    totalPrice: claimedTotal,
+  } = await req.json()
   const displayMode = rawDisplayMode === 'STRETCH' ? 'STRETCH' : 'REPEAT'
 
   if (!Array.isArray(tileIds) || tileIds.length === 0) {
@@ -84,6 +93,21 @@ export async function POST(req: Request) {
     )
   }
 
+  const isCampaign = typeof durationType === 'string' && durationType !== ''
+
+  if (isCampaign) {
+    return handleCampaignRental(session.userId, {
+      uniqueTileIds,
+      imageUrl,
+      normalizedDestUrl,
+      altText,
+      displayMode,
+      durationType,
+      claimedTotal: typeof claimedTotal === 'number' ? claimedTotal : 0,
+    })
+  }
+
+  // --- Legacy per-day billing path ---
   const [tilePrice, freeEnabled, autoApprove] = await Promise.all([
     getTilePrice(),
     isFreeRentalEnabled(),
@@ -92,12 +116,9 @@ export async function POST(req: Request) {
 
   const dailyRate = freeEnabled ? 0 : tilePrice
 
-  // Prepaid 24h balance check (only when paid and auto-approved — if not auto-approved, deduct on admin approval)
   if (!freeEnabled && autoApprove) {
     const requiredCents = Math.round(uniqueTileIds.length * tilePrice * 100)
-    const wallet = await prisma.advertiserWallet.findUnique({
-      where: { userId: session.userId },
-    })
+    const wallet = await prisma.advertiserWallet.findUnique({ where: { userId: session.userId } })
     const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
     if (!wallet || walletCents < requiredCents) {
       const shortfall = Math.max(0, requiredCents - walletCents) / 100
@@ -111,11 +132,8 @@ export async function POST(req: Request) {
       )
     }
   } else if (!freeEnabled && !autoApprove) {
-    // Balance check for manual-approve mode: check 1-day reserve without deducting yet
     const requiredCents = Math.round(uniqueTileIds.length * tilePrice * 100)
-    const wallet = await prisma.advertiserWallet.findUnique({
-      where: { userId: session.userId },
-    })
+    const wallet = await prisma.advertiserWallet.findUnique({ where: { userId: session.userId } })
     const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
     if (!wallet || walletCents < requiredCents) {
       const shortfall = Math.max(0, requiredCents - walletCents) / 100
@@ -133,7 +151,6 @@ export async function POST(req: Request) {
   const now = new Date()
   const first24hCost = freeEnabled ? 0 : uniqueTileIds.length * dailyRate
 
-  // Get epoch for revenue event (only needed when auto-approving a paid ad)
   let epochId: string | null = null
   if (autoApprove && !freeEnabled && first24hCost > 0) {
     const epoch = await getOrCreateEpoch(utcDayStart(now))
@@ -162,7 +179,6 @@ export async function POST(req: Request) {
       )
     )
 
-    // Prepaid billing: deduct balance and create AD_RENT_REVENUE on activation
     let revenueEvent = null
     if (autoApprove && !freeEnabled && first24hCost > 0) {
       await tx.advertiserWallet.update({
@@ -190,10 +206,9 @@ export async function POST(req: Request) {
     return { creative, rentals, revenueEvent }
   })
 
-  // Fire-and-forget settlement (don't block the response)
   if (result.revenueEvent) {
     void settleRevenueEvent(result.revenueEvent.id).catch((err) =>
-      console.error('[settlement] activation error', revenueEventId(result.revenueEvent), err)
+      console.error('[settlement] activation error', result.revenueEvent?.id, err)
     )
   }
 
@@ -203,8 +218,146 @@ export async function POST(req: Request) {
   )
 }
 
-function revenueEventId(ev: { id: string } | null) {
-  return ev?.id ?? 'unknown'
+async function handleCampaignRental(
+  userId: string,
+  opts: {
+    uniqueTileIds: number[]
+    imageUrl: string
+    normalizedDestUrl: string
+    altText?: string
+    displayMode: 'REPEAT' | 'STRETCH'
+    durationType: string
+    claimedTotal: number
+  }
+) {
+  const { uniqueTileIds, imageUrl, normalizedDestUrl, altText, displayMode, durationType, claimedTotal } = opts
+
+  const validation = validateCampaignPrice(durationType, uniqueTileIds.length, claimedTotal)
+  if (!validation.valid || !validation.computed) {
+    return NextResponse.json({ error: validation.error }, { status: 400 })
+  }
+
+  const { durationDays, totalPrice, dailyRecognizedRevenue } = validation.computed
+
+  const wallet = await prisma.advertiserWallet.findUnique({ where: { userId } })
+  const walletCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+  const requiredCents = Math.round(totalPrice * 100)
+  if (!wallet || walletCents < requiredCents) {
+    const shortfall = Math.max(0, requiredCents - walletCents) / 100
+    return NextResponse.json(
+      {
+        error: `Insufficient balance. Need $${totalPrice.toFixed(2)} USDC for this campaign. Shortfall: $${shortfall.toFixed(2)}`,
+        required: totalPrice,
+        shortfall,
+      },
+      { status: 402 }
+    )
+  }
+
+  const now = new Date()
+  const campaignEndAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000)
+  const periodStart = utcDayStart(now)
+  const periodEnd = new Date(periodStart.getTime() + 24 * 60 * 60 * 1000 - 1)
+
+  const epoch = await getOrCreateEpoch(periodStart)
+
+  const result = await prisma.$transaction(async (tx) => {
+    const creative = await tx.adCreative.create({
+      data: {
+        userId,
+        imageUrl,
+        destUrl: normalizedDestUrl,
+        altText: altText ?? null,
+        displayMode,
+        durationType: durationType as DurationType,
+        durationDays,
+        totalPrice,
+        prepaidAmount: totalPrice,
+        recognizedAmount: dailyRecognizedRevenue,
+        dailyRecognizedRevenue,
+        campaignStartAt: now,
+        campaignEndAt,
+        lastRecognizedAt: now,
+        nextRecognitionAt: new Date(periodStart.getTime() + 24 * 60 * 60 * 1000),
+        campaignStatus: 'ACTIVE',
+      },
+    })
+
+    const rentals = await Promise.all(
+      uniqueTileIds.map((tileId: number) =>
+        tx.adRental.create({
+          data: {
+            userId,
+            tileId,
+            creativeId: creative.id,
+            status: 'ACTIVE',
+            startDate: now,
+            // No nextBillingAt — campaign billing handled by recognition job
+            dailyRate: dailyRecognizedRevenue / uniqueTileIds.length,
+          },
+        })
+      )
+    )
+
+    // Deduct full campaign price upfront
+    await tx.advertiserWallet.update({
+      where: { userId },
+      data: { usdcBalance: { decrement: totalPrice } },
+    })
+
+    // First day recognition event
+    const revenueEvent = await tx.revenueEvent.create({
+      data: {
+        type: 'AD_RENT_REVENUE',
+        source: 'activation',
+        amount: dailyRecognizedRevenue,
+        currency: 'USDC',
+        epochId: epoch.id,
+        userId,
+        metadata: {
+          tileCount: uniqueTileIds.length,
+          creativeId: creative.id,
+          durationType,
+          durationDays,
+          totalPrice,
+          recognitionDay: 1,
+        },
+      },
+    })
+
+    // Idempotency record for first day
+    await tx.campaignRevenueRecognition.create({
+      data: {
+        creativeId: creative.id,
+        recognitionPeriodStart: periodStart,
+        recognitionPeriodEnd: periodEnd,
+        amount: dailyRecognizedRevenue,
+        revenueEventId: revenueEvent.id,
+      },
+    })
+
+    return { creative, rentals, revenueEvent }
+  })
+
+  void settleRevenueEvent(result.revenueEvent.id).catch((err) =>
+    console.error('[settlement] campaign activation error', result.revenueEvent.id, err)
+  )
+
+  return NextResponse.json(
+    {
+      ok: true,
+      rentalCount: result.rentals.length,
+      autoApproved: true,
+      campaign: {
+        durationType,
+        durationDays,
+        totalPrice,
+        campaignStartAt: result.creative.campaignStartAt,
+        campaignEndAt: result.creative.campaignEndAt,
+      },
+    },
+    { status: 201 }
+  )
 }
 
 export async function DELETE(req: Request) {
