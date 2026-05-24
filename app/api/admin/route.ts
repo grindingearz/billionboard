@@ -26,6 +26,15 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const view = searchParams.get('view') ?? 'pending'
 
+  function parsePag() {
+    const page = Math.max(1, parseInt(searchParams.get('page') ?? '1'))
+    const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get('pageSize') ?? '25')))
+    return { page, pageSize, skip: (page - 1) * pageSize }
+  }
+  function paged<T>(rows: T[], page: number, pageSize: number, totalRows: number) {
+    return { rows, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) }
+  }
+
   if (view === 'pending') {
     const BOARD_COLS = 400
     const allRentals = await prisma.adRental.findMany({
@@ -74,7 +83,7 @@ export async function GET(req: Request) {
       o.dailyRateTotal += Number(rental.dailyRate)
     }
 
-    const orders = Array.from(orderMap.values()).map((o) => {
+    const allOrders = Array.from(orderMap.values()).map((o) => {
       let blockCols: number | undefined
       let blockRows: number | undefined
       if (o.creative?.displayMode === 'STRETCH' && o.tileIds.length > 1) {
@@ -86,7 +95,10 @@ export async function GET(req: Request) {
       return { ...o, tileCount: o.tileIds.length, blockCols, blockRows }
     })
 
-    return NextResponse.json({ orders })
+    const { page, pageSize, skip } = parsePag()
+    const totalRows = allOrders.length
+    const orders = allOrders.slice(skip, skip + pageSize)
+    return NextResponse.json({ orders, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'active') {
@@ -111,7 +123,13 @@ export async function GET(req: Request) {
       nextBillingAt: Date | null
       lastBilledAt: Date | null
       dailyRateTotal: number
-      creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
+      creative: {
+        imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string
+        durationType: string | null; durationDays: number | null; totalPrice: number | null
+        recognizedAmount: number | null; dailyRecognizedRevenue: number | null
+        campaignStartAt: Date | null; campaignEndAt: Date | null
+        autoRenew: boolean; renewalCount: number; campaignStatus: string | null
+      } | null
       user: { email: string | null; walletAddress: string | null }
     }
 
@@ -131,8 +149,22 @@ export async function GET(req: Request) {
           lastBilledAt: rental.lastBilledAt,
           dailyRateTotal: 0,
           creative: rental.creative
-            ? { imageUrl: rental.creative.imageUrl, destUrl: rental.creative.destUrl,
-                altText: rental.creative.altText, displayMode: rental.creative.displayMode }
+            ? {
+                imageUrl: rental.creative.imageUrl,
+                destUrl: rental.creative.destUrl,
+                altText: rental.creative.altText,
+                displayMode: rental.creative.displayMode,
+                durationType: rental.creative.durationType ?? null,
+                durationDays: rental.creative.durationDays ?? null,
+                totalPrice: rental.creative.totalPrice != null ? Number(rental.creative.totalPrice) : null,
+                recognizedAmount: rental.creative.recognizedAmount != null ? Number(rental.creative.recognizedAmount) : null,
+                dailyRecognizedRevenue: rental.creative.dailyRecognizedRevenue != null ? Number(rental.creative.dailyRecognizedRevenue) : null,
+                campaignStartAt: rental.creative.campaignStartAt ?? null,
+                campaignEndAt: rental.creative.campaignEndAt ?? null,
+                autoRenew: rental.creative.autoRenew,
+                renewalCount: rental.creative.renewalCount,
+                campaignStatus: rental.creative.campaignStatus ?? null,
+              }
             : null,
           user: { email: rental.user.email ?? null, walletAddress: rental.user.walletAddress ?? null },
         })
@@ -143,7 +175,7 @@ export async function GET(req: Request) {
       o.dailyRateTotal += Number(rental.dailyRate)
     }
 
-    const orders = Array.from(orderMap.values()).map((o) => {
+    const allOrders = Array.from(orderMap.values()).map((o) => {
       let blockCols: number | undefined
       let blockRows: number | undefined
       if (o.creative?.displayMode === 'STRETCH' && o.tileIds.length > 1) {
@@ -155,7 +187,10 @@ export async function GET(req: Request) {
       return { ...o, tileCount: o.tileIds.length, blockCols, blockRows }
     })
 
-    return NextResponse.json({ orders })
+    const { page, pageSize, skip } = parsePag()
+    const totalRows = allOrders.length
+    const orders = allOrders.slice(skip, skip + pageSize)
+    return NextResponse.json({ orders, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'epochs') {
@@ -167,12 +202,16 @@ export async function GET(req: Request) {
   }
 
   if (view === 'distribution') {
-    const epochs = await prisma.distributionEpoch.findMany({
-      orderBy: { epochDate: 'desc' },
-      take: 30,
-      include: { _count: { select: { holderSnapshots: true, claims: true } } },
-    })
-    return NextResponse.json({ epochs })
+    const { page, pageSize, skip } = parsePag()
+    const [epochs, totalRows] = await Promise.all([
+      prisma.distributionEpoch.findMany({
+        orderBy: { epochDate: 'desc' },
+        skip, take: pageSize,
+        include: { _count: { select: { holderSnapshots: true, claims: true } } },
+      }),
+      prisma.distributionEpoch.count(),
+    ])
+    return NextResponse.json({ ...paged(epochs, page, pageSize, totalRows) })
   }
 
   if (view === 'current_epoch') {
@@ -191,23 +230,26 @@ export async function GET(req: Request) {
   }
 
   if (view === 'revenue_events') {
+    const { page, pageSize, skip } = parsePag()
     const typeFilter = searchParams.get('type')
-    const events = await prisma.revenueEvent.findMany({
-      where: typeFilter ? { type: typeFilter as never } : undefined,
-      include: {
-        settlement: {
-          select: {
-            settlementStatus: true,
-            moveToRevenueTxSignature: true,
-            treasuryTxSignature: true,
-            distributionTxSignature: true,
+    const settlFilter = searchParams.get('settlementStatus')
+    const where: Record<string, unknown> = {}
+    if (typeFilter) where.type = typeFilter
+    if (settlFilter) where.settlement = { settlementStatus: settlFilter }
+    const [events, totalRows] = await Promise.all([
+      prisma.revenueEvent.findMany({
+        where,
+        include: {
+          settlement: {
+            select: { settlementStatus: true, moveToRevenueTxSignature: true, treasuryTxSignature: true, distributionTxSignature: true },
           },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 200,
-    })
-    return NextResponse.json({ events })
+        orderBy: { createdAt: 'desc' },
+        skip, take: pageSize,
+      }),
+      prisma.revenueEvent.count({ where }),
+    ])
+    return NextResponse.json({ events, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'excluded_wallets') {
@@ -218,34 +260,48 @@ export async function GET(req: Request) {
   }
 
   if (view === 'billing') {
-    const runs = await prisma.dailyBillingRun.findMany({
-      orderBy: { runDate: 'desc' },
-      take: 10,
-    })
-    return NextResponse.json({ runs })
+    const { page, pageSize, skip } = parsePag()
+    const [runs, totalRows] = await Promise.all([
+      prisma.dailyBillingRun.findMany({ orderBy: { runDate: 'desc' }, skip, take: pageSize }),
+      prisma.dailyBillingRun.count(),
+    ])
+    return NextResponse.json({ runs, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'topups') {
-    const [pending, confirmed, unmatched] = await Promise.all([
+    const status = searchParams.get('status') ?? 'pending'
+    const search = searchParams.get('search') ?? ''
+    const { page, pageSize, skip } = parsePag()
+
+    if (status === 'unmatched') {
+      const where: Record<string, unknown> = { topupId: null }
+      if (search) where.OR = [{ signature: { contains: search } }, { senderWallet: { contains: search } }]
+      const [rows, totalRows] = await Promise.all([
+        prisma.processedTransaction.findMany({ where, orderBy: { processedAt: 'desc' }, skip, take: pageSize }),
+        prisma.processedTransaction.count({ where }),
+      ])
+      return NextResponse.json({ rows, status: 'unmatched', page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
+    }
+
+    const statusMap: Record<string, unknown> = {
+      pending: { in: ['PENDING'] },
+      confirmed: { in: ['CONFIRMED'] },
+      expired: { in: ['EXPIRED', 'FAILED'] },
+    }
+    const where: Record<string, unknown> = { status: statusMap[status] ?? statusMap.pending }
+    if (status === 'pending') where.method = 'usdc_solana'
+    if (search) where.OR = [{ txSignature: { contains: search } }, { advertiserWallet: { contains: search } }]
+
+    const [rows, totalRows] = await Promise.all([
       prisma.topup.findMany({
-        where: { status: { in: ['PENDING', 'EXPIRED'] }, method: 'usdc_solana' },
+        where,
         include: { user: { select: { email: true } } },
         orderBy: { createdAt: 'desc' },
-        take: 50,
+        skip, take: pageSize,
       }),
-      prisma.topup.findMany({
-        where: { status: 'CONFIRMED' },
-        include: { user: { select: { email: true } } },
-        orderBy: { confirmedAt: 'desc' },
-        take: 50,
-      }),
-      prisma.processedTransaction.findMany({
-        where: { topupId: null },
-        orderBy: { processedAt: 'desc' },
-        take: 50,
-      }),
+      prisma.topup.count({ where }),
     ])
-    return NextResponse.json({ pending, confirmed, unmatched })
+    return NextResponse.json({ rows, status, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'reset_state') {
@@ -278,19 +334,32 @@ export async function GET(req: Request) {
   }
 
   if (view === 'user_balances') {
-    const users = await prisma.user.findMany({
-      where: { role: 'ADVERTISER' },
-      select: {
-        id: true,
-        walletAddress: true,
-        email: true,
-        createdAt: true,
-        advertiserWallet: { select: { usdcBalance: true } },
-        _count: { select: { adRentals: true, topups: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    })
+    const { page, pageSize, skip } = parsePag()
+    const search = searchParams.get('search') ?? ''
+    const hasBalance = searchParams.get('hasBalance') === 'true'
+    const where: Record<string, unknown> = { role: 'ADVERTISER' }
+    if (search) where.OR = [
+      { walletAddress: { contains: search, mode: 'insensitive' } },
+      { email: { contains: search, mode: 'insensitive' } },
+    ]
+    if (hasBalance) where.advertiserWallet = { usdcBalance: { gt: 0 } }
+
+    const [users, totalRows] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          walletAddress: true,
+          email: true,
+          createdAt: true,
+          advertiserWallet: { select: { usdcBalance: true } },
+          _count: { select: { adRentals: true, topups: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip, take: pageSize,
+      }),
+      prisma.user.count({ where }),
+    ])
 
     // Enrich with topup breakdown and active burn
     const userIds = users.map((u) => u.id)
@@ -317,44 +386,58 @@ export async function GET(req: Request) {
     const mockTopupMap = new Map(mockTopups.map((r) => [r.userId, Number(r._sum.actualAmount ?? 0)]))
     const burnMap = new Map(activeRentalRates.map((r) => [r.userId, { daily: Number(r._sum.dailyRate ?? 0), tiles: r._count._all }]))
 
-    return NextResponse.json({
-      users: users.map((u) => ({
-        id: u.id,
-        walletAddress: u.walletAddress,
-        email: u.email,
-        balance: u.advertiserWallet ? Number(u.advertiserWallet.usdcBalance) : 0,
-        rentalCount: u._count.adRentals,
-        topupCount: u._count.topups,
-        createdAt: u.createdAt,
-        confirmedRealTopups: realTopupMap.get(u.id) ?? 0,
-        mockTopups: mockTopupMap.get(u.id) ?? 0,
-        activeDailyBurn: burnMap.get(u.id)?.daily ?? 0,
-        activeTiles: burnMap.get(u.id)?.tiles ?? 0,
-      })),
-    })
+    const enriched = users.map((u) => ({
+      id: u.id,
+      walletAddress: u.walletAddress,
+      email: u.email,
+      balance: u.advertiserWallet ? Number(u.advertiserWallet.usdcBalance) : 0,
+      rentalCount: u._count.adRentals,
+      topupCount: u._count.topups,
+      createdAt: u.createdAt,
+      confirmedRealTopups: realTopupMap.get(u.id) ?? 0,
+      mockTopups: mockTopupMap.get(u.id) ?? 0,
+      activeDailyBurn: burnMap.get(u.id)?.daily ?? 0,
+      activeTiles: burnMap.get(u.id)?.tiles ?? 0,
+    }))
+    return NextResponse.json({ users: enriched, page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)) })
   }
 
   if (view === 'settlements') {
+    const { page, pageSize, skip } = parsePag()
     const statusFilter = searchParams.get('status')
-    const [settlements, totalsAgg, settledTreasuryAgg, settledDistAgg, pendingAgg, failedAgg] = await Promise.all([
+    const typeFilter = searchParams.get('type')
+    const retryableOnly = searchParams.get('retryableOnly') === 'true'
+    const dateFrom = searchParams.get('dateFrom')
+    const dateTo = searchParams.get('dateTo')
+
+    const rowWhere: Record<string, unknown> = {}
+    if (statusFilter && statusFilter !== 'all') rowWhere.settlementStatus = statusFilter
+    if (retryableOnly) { rowWhere.retryable = true; rowWhere.settlementStatus = { not: 'SETTLED' } }
+    if (typeFilter && typeFilter !== 'all') rowWhere.revenueEvent = { type: typeFilter }
+    if (dateFrom || dateTo) {
+      rowWhere.createdAt = {} as Record<string, Date>
+      if (dateFrom) (rowWhere.createdAt as Record<string, Date>).gte = new Date(dateFrom)
+      if (dateTo) (rowWhere.createdAt as Record<string, Date>).lte = new Date(dateTo + 'T23:59:59Z')
+    }
+
+    const [settlements, totalRows, totalsAgg, settledTreasuryAgg, settledDistAgg, pendingAgg, failedAgg, retryableCount] = await Promise.all([
       prisma.revenueSettlement.findMany({
-        where: statusFilter ? { settlementStatus: statusFilter as never } : undefined,
-        include: {
-          revenueEvent: {
-            select: { type: true, amount: true, createdAt: true, userId: true },
-          },
-        },
+        where: rowWhere,
+        include: { revenueEvent: { select: { type: true, amount: true, createdAt: true, userId: true } } },
         orderBy: { createdAt: 'desc' },
-        take: 100,
+        skip, take: pageSize,
       }),
+      prisma.revenueSettlement.count({ where: rowWhere }),
       prisma.revenueSettlement.aggregate({ _sum: { amount: true, treasuryAmount: true, distributionAmount: true }, _count: { _all: true } }),
       prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { treasuryAmount: true } }),
       prisma.revenueSettlement.aggregate({ where: { settlementStatus: 'SETTLED' }, _sum: { distributionAmount: true } }),
       prisma.revenueSettlement.aggregate({ where: { settlementStatus: { notIn: ['SETTLED', 'FAILED', 'PARTIAL'] } }, _sum: { amount: true } }),
       prisma.revenueSettlement.aggregate({ where: { settlementStatus: { in: ['FAILED', 'PARTIAL'] } }, _sum: { amount: true } }),
+      prisma.revenueSettlement.count({ where: { retryable: true, settlementStatus: { not: 'SETTLED' } } }),
     ])
     return NextResponse.json({
       settlements,
+      page, pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / pageSize)),
       totals: {
         totalEvents: totalsAgg._count._all,
         totalAmount: Number(totalsAgg._sum.amount ?? 0),
@@ -364,6 +447,7 @@ export async function GET(req: Request) {
         distributionSettled: Number(settledDistAgg._sum.distributionAmount ?? 0),
         pendingAmount: Number(pendingAgg._sum.amount ?? 0),
         failedAmount: Number(failedAgg._sum.amount ?? 0),
+        retryableCount,
       },
     })
   }

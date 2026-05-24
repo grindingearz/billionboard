@@ -47,6 +47,14 @@ export default function AdvertisePage() {
   const [topupAmount, setTopupAmount] = useState('10')
   const [topping, setTopping] = useState(false)
   const [showTopup, setShowTopup] = useState(false)
+  const [showMyAds, setShowMyAds] = useState(false)
+  const [myAds, setMyAds] = useState<Array<{
+    id: string; destinationDomain: string; tileCount: number; durationType: string | null
+    totalPrice: number | null; recognizedAmount: number | null; dailyRecognizedRevenue: number | null
+    campaignEndAt: string | null; autoRenew: boolean; renewalCount: number; campaignStatus: string | null
+    nextRenewalCost: number | null
+  }>>([])
+  const [togglingAutoRenew, setTogglingAutoRenew] = useState<string | null>(null)
   const [walletAddress, setWalletAddress] = useState('')
   const [walletInput, setWalletInput] = useState('')
   const [savingWallet, setSavingWallet] = useState(false)
@@ -55,6 +63,7 @@ export default function AdvertisePage() {
   const [form, setForm] = useState({ imageUrl: '', destUrl: '', altText: '' })
   const [displayMode, setDisplayMode] = useState<DisplayMode>('REPEAT')
   const [durationType, setDurationType] = useState<DurationType>('DAILY')
+  const [autoRenew, setAutoRenew] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [uploadError, setUploadError] = useState('')
@@ -199,6 +208,19 @@ export default function AdvertisePage() {
     }
   }, [])
 
+  const loadMyAds = useCallback(async () => {
+    const forWallet = authedWalletRef.current
+    if (!forWallet) return
+    try {
+      const res = await fetch('/api/user/dashboard', {
+        headers: { 'x-wallet-address': forWallet },
+      })
+      if (!res.ok || authedWalletRef.current !== forWallet) return
+      const data = await res.json()
+      setMyAds((data.ads ?? []).filter((a: { durationType: string | null }) => a.durationType))
+    } catch { /* ignore */ }
+  }, [])
+
   const loadSettings = useCallback(async () => {
     try {
       const res = await fetch('/api/settings')
@@ -219,6 +241,10 @@ export default function AdvertisePage() {
     loadTiles()
     loadSettings()
   }, [loadTiles, loadSettings])
+
+  useEffect(() => {
+    if (authState === 'logged_in') loadMyAds()
+  }, [authState, loadMyAds])
 
   // Dev: verify selection and balance precision logic on mount; check browser console for results
   useEffect(() => {
@@ -544,13 +570,14 @@ export default function AdvertisePage() {
         displayMode,
         durationType,
         totalPrice: campaignTotal,
+        autoRenew,
       }),
     })
     const data = await res.json()
     if (res.ok) {
       setSubmittedAutoApproved((data as { autoApproved?: boolean }).autoApproved ?? false)
       setStep('submitted')
-      await loadTiles()
+      await Promise.all([loadTiles(), loadMyAds()])
     } else {
       setError(data.error ?? 'Submission failed')
     }
@@ -621,6 +648,7 @@ export default function AdvertisePage() {
               setForm({ imageUrl: '', destUrl: '', altText: '' })
               setDisplayMode('REPEAT')
               setDurationType('DAILY')
+              setAutoRenew(true)
               setUploadError('')
               setUrlError('')
               setDisplayModeError('')
@@ -648,11 +676,19 @@ export default function AdvertisePage() {
               ${balance?.toFixed(2) ?? '…'} USDC
             </div>
             <button
-              onClick={() => setShowTopup((v) => !v)}
+              onClick={() => { setShowTopup((v) => !v); setShowMyAds(false) }}
               className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded transition-colors"
             >
               + Top up
             </button>
+            {myAds.length > 0 && (
+              <button
+                onClick={() => { setShowMyAds((v) => !v); setShowTopup(false) }}
+                className={`text-xs px-3 py-1 rounded transition-colors ${showMyAds ? 'bg-blue-400/20 text-blue-300' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+              >
+                My Ads ({myAds.length})
+              </button>
+            )}
             {topupSuccess && <span className="text-green-400 text-xs font-medium">USDC added!</span>}
             {topupError && <span className="text-red-400 text-xs">{topupError}</span>}
           </div>
@@ -802,6 +838,67 @@ export default function AdvertisePage() {
                 </button>
               </form>
             )}
+          </div>
+        )}
+
+        {/* ── My Ads panel ── */}
+        {showMyAds && myAds.length > 0 && (
+          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+            <div className="text-xs text-white/50 uppercase tracking-widest">Active Campaigns</div>
+            {myAds.map((ad) => {
+              const endDate = ad.campaignEndAt ? new Date(ad.campaignEndAt) : null
+              const unrecognized = ad.totalPrice != null && ad.recognizedAmount != null
+                ? Math.max(0, ad.totalPrice - ad.recognizedAmount)
+                : null
+              return (
+                <div key={ad.id} className="flex items-start justify-between gap-4 p-3 border border-white/10 rounded-lg bg-white/2">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-sm text-white font-medium truncate">{ad.destinationDomain}</div>
+                    <div className="text-xs text-white/40 font-mono">
+                      {ad.tileCount} tile{ad.tileCount !== 1 ? 's' : ''} · {ad.durationType} · ${ad.totalPrice?.toFixed(2)}/cycle
+                    </div>
+                    {endDate && (
+                      <div className="text-[10px] text-white/30">
+                        {ad.autoRenew ? 'Renews' : 'Ends'}: {endDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                        {ad.autoRenew && ad.nextRenewalCost != null && ` · $${ad.nextRenewalCost.toFixed(2)} from balance`}
+                      </div>
+                    )}
+                    {unrecognized != null && (
+                      <div className="text-[10px] text-white/20">
+                        ${ad.recognizedAmount?.toFixed(2)} recognized · ${unrecognized.toFixed(2)} prepaid remaining
+                        {(ad.renewalCount ?? 0) > 0 && ` · renewal #${ad.renewalCount}`}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    disabled={togglingAutoRenew === ad.id}
+                    onClick={async () => {
+                      setTogglingAutoRenew(ad.id)
+                      try {
+                        const newVal = !ad.autoRenew
+                        const res = await fetch('/api/rentals', {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json', ...(publicKey ? { 'x-wallet-address': publicKey.toBase58() } : {}) },
+                          body: JSON.stringify({ creativeId: ad.id, autoRenew: newVal }),
+                        })
+                        if (res.ok) {
+                          setMyAds((prev) => prev.map((a) => a.id === ad.id ? { ...a, autoRenew: newVal } : a))
+                        }
+                      } finally {
+                        setTogglingAutoRenew(null)
+                      }
+                    }}
+                    className={`flex-shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
+                      ad.autoRenew
+                        ? 'border-green-400/40 text-green-400 bg-green-400/10 hover:bg-green-400/20'
+                        : 'border-white/20 text-white/50 bg-white/5 hover:bg-white/10'
+                    }`}
+                  >
+                    {togglingAutoRenew === ad.id ? '…' : ad.autoRenew ? 'Auto-renew ON' : 'Auto-renew OFF'}
+                  </button>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>
@@ -1087,6 +1184,26 @@ export default function AdvertisePage() {
                     {selectedTiles.size} tiles × ${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)} = <span className="text-green-400 font-mono">${campaignTotal.toFixed(2)} total</span> deducted upfront · ${campaignDailyRevenue.toFixed(2)}/day recognized over {campaignDays} day{campaignDays > 1 ? 's' : ''}
                   </p>
                 )}
+
+                {/* Auto-renew toggle */}
+                <div
+                  className={`mt-3 flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+                    autoRenew ? 'border-green-400/40 bg-green-400/5' : 'border-white/10 bg-white/5'
+                  }`}
+                  onClick={() => setAutoRenew((v) => !v)}
+                >
+                  <div className={`mt-0.5 w-4 h-4 rounded flex-shrink-0 flex items-center justify-center border transition-colors ${
+                    autoRenew ? 'bg-green-400 border-green-400' : 'border-white/30 bg-transparent'
+                  }`}>
+                    {autoRenew && <span className="text-black text-[10px] font-bold leading-none">✓</span>}
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-white">Auto-renew from my BillionBoard balance</div>
+                    <div className="text-xs text-white/40 mt-0.5 leading-snug">
+                      When this campaign ends, automatically renew for another {campaignDays} day{campaignDays > 1 ? 's' : ''} at ${campaignTotal > 0 ? campaignTotal.toFixed(2) : `$${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)}/tile`}. Only charges your deposited balance — never your wallet directly. You can turn this off anytime.
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1260,6 +1377,18 @@ export default function AdvertisePage() {
                       {new Date(Date.now() + campaignDays * 86400000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                     </span>
                   </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-white/50">Auto-renew</span>
+                    <span className={`font-mono text-sm ${autoRenew ? 'text-green-400' : 'text-white/40'}`}>
+                      {autoRenew ? `ON — renews at $${campaignTotal.toFixed(2)}` : 'OFF'}
+                    </span>
+                  </div>
+                  {autoRenew && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-white/50">Next renewal cost</span>
+                      <span className="text-white/60 font-mono">${campaignTotal.toFixed(2)} USDC</span>
+                    </div>
+                  )}
                 </>
               )}
               {freeRental.enabled && (
@@ -1312,12 +1441,19 @@ export default function AdvertisePage() {
               </div>
             )}
 
-            <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3">
-              {freeRental.enabled
-                ? 'Your ad goes live immediately. No charge.'
-                : autoApproveEnabled
-                  ? `Your ad goes live immediately. $${campaignTotal.toFixed(2)} is deducted upfront and your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}. Revenue is recognized daily.`
-                  : `Your ad will be reviewed before going live. $${campaignTotal.toFixed(2)} will be deducted on approval and your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}.`}
+            <div className="text-xs text-white/30 bg-white/5 rounded-lg p-3 space-y-1">
+              <div>
+                {freeRental.enabled
+                  ? 'Your ad goes live immediately. No charge.'
+                  : autoApproveEnabled
+                    ? `Your ad goes live immediately. $${campaignTotal.toFixed(2)} is deducted upfront and your campaign runs for ${campaignDays} day${campaignDays > 1 ? 's' : ''}.`
+                    : `Your ad will be reviewed before going live. $${campaignTotal.toFixed(2)} will be deducted on approval.`}
+              </div>
+              {!freeRental.enabled && autoRenew && (
+                <div className="text-green-400/50">
+                  Auto-renew is ON. After {campaignDays} day{campaignDays > 1 ? 's' : ''}, ${campaignTotal.toFixed(2)} will be deducted from your BillionBoard balance to extend for another {campaignDays} day{campaignDays > 1 ? 's' : ''}. You can turn this off anytime before renewal.
+                </div>
+              )}
             </div>
 
             <div className="flex gap-3">

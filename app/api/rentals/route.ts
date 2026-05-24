@@ -40,7 +40,9 @@ export async function POST(req: Request) {
     displayMode: rawDisplayMode,
     durationType,
     totalPrice: claimedTotal,
+    autoRenew: rawAutoRenew,
   } = await req.json()
+  const autoRenew = rawAutoRenew === false ? false : true // default true
   const displayMode = rawDisplayMode === 'STRETCH' ? 'STRETCH' : 'REPEAT'
 
   if (!Array.isArray(tileIds) || tileIds.length === 0) {
@@ -104,6 +106,7 @@ export async function POST(req: Request) {
       displayMode,
       durationType,
       claimedTotal: typeof claimedTotal === 'number' ? claimedTotal : 0,
+      autoRenew,
     })
   }
 
@@ -228,9 +231,10 @@ async function handleCampaignRental(
     displayMode: 'REPEAT' | 'STRETCH'
     durationType: string
     claimedTotal: number
+    autoRenew: boolean
   }
 ) {
-  const { uniqueTileIds, imageUrl, normalizedDestUrl, altText, displayMode, durationType, claimedTotal } = opts
+  const { uniqueTileIds, imageUrl, normalizedDestUrl, altText, displayMode, durationType, claimedTotal, autoRenew } = opts
 
   const validation = validateCampaignPrice(durationType, uniqueTileIds.length, claimedTotal)
   if (!validation.valid || !validation.computed) {
@@ -280,6 +284,8 @@ async function handleCampaignRental(
         lastRecognizedAt: now,
         nextRecognitionAt: new Date(periodStart.getTime() + 24 * 60 * 60 * 1000),
         campaignStatus: 'ACTIVE',
+        autoRenew,
+        renewalCount: 0,
       },
     })
 
@@ -358,6 +364,35 @@ async function handleCampaignRental(
     },
     { status: 201 }
   )
+}
+
+export async function PATCH(req: Request) {
+  const session = await getSession()
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (walletMismatch(session, req)) return NextResponse.json({ error: 'Wallet mismatch' }, { status: 403 })
+
+  const { creativeId, autoRenew } = await req.json()
+  if (!creativeId || typeof autoRenew !== 'boolean') {
+    return NextResponse.json({ error: 'creativeId and autoRenew (boolean) required' }, { status: 400 })
+  }
+
+  const creative = await prisma.adCreative.findUnique({
+    where: { id: creativeId },
+    select: { userId: true, durationType: true, campaignStatus: true },
+  })
+  if (!creative || creative.userId !== session.userId) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  }
+  if (!creative.durationType) {
+    return NextResponse.json({ error: 'Not a campaign' }, { status: 400 })
+  }
+
+  await prisma.adCreative.update({
+    where: { id: creativeId },
+    data: { autoRenew },
+  })
+
+  return NextResponse.json({ ok: true, autoRenew })
 }
 
 export async function DELETE(req: Request) {

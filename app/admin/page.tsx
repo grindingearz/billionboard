@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'pending' | 'active' | 'billing' | 'epochs' | 'pricing' | 'topups' | 'reset' | 'distribution' | 'users' | 'accounting' | 'settlements'
+type AdminView = 'overview' | 'rentals' | 'settlements' | 'topups' | 'accounting' | 'distribution' | 'users' | 'settings' | 'reset'
 
 interface KeyDiagnostic {
   present: boolean
@@ -45,7 +45,13 @@ interface RentalOrder {
   nextBillingAt: string | null
   lastBilledAt: string | null
   dailyRateTotal: number
-  creative: { imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string } | null
+  creative: {
+    imageUrl: string | null; destUrl: string; altText: string | null; displayMode: string
+    durationType?: string | null; durationDays?: number | null; totalPrice?: number | null
+    recognizedAmount?: number | null; dailyRecognizedRevenue?: number | null
+    campaignStartAt?: string | null; campaignEndAt?: string | null
+    autoRenew?: boolean; renewalCount?: number; campaignStatus?: string | null
+  } | null
   user: { email: string | null; walletAddress: string | null }
   blockCols?: number
   blockRows?: number
@@ -320,6 +326,35 @@ interface TxSigCheckResult {
   results?: Array<{ matched: boolean; skipped: boolean; reason?: string; amount: number; sender: string }>
 }
 
+interface PagState { page: number; pageSize: number; totalRows: number; totalPages: number }
+const initPag: PagState = { page: 1, pageSize: 25, totalRows: 0, totalPages: 1 }
+
+function Pager({ pag, onPage, onPageSize }: {
+  pag: PagState; onPage: (p: number) => void; onPageSize?: (ps: number) => void
+}) {
+  if (pag.totalRows === 0) return null
+  const from = (pag.page - 1) * pag.pageSize + 1
+  const to = Math.min(pag.page * pag.pageSize, pag.totalRows)
+  return (
+    <div className="flex items-center justify-between gap-2 py-2 text-[11px] text-white/40 border-t border-white/5 mt-1">
+      <span>{from}–{to} of {pag.totalRows.toLocaleString()}</span>
+      <div className="flex items-center gap-0.5">
+        <button onClick={() => onPage(1)} disabled={pag.page <= 1} className="px-2 py-0.5 rounded hover:text-white/80 disabled:opacity-25 transition-colors">«</button>
+        <button onClick={() => onPage(pag.page - 1)} disabled={pag.page <= 1} className="px-2 py-0.5 rounded hover:text-white/80 disabled:opacity-25 transition-colors">‹</button>
+        <span className="px-2 font-mono text-white/50">{pag.page} / {pag.totalPages}</span>
+        <button onClick={() => onPage(pag.page + 1)} disabled={pag.page >= pag.totalPages} className="px-2 py-0.5 rounded hover:text-white/80 disabled:opacity-25 transition-colors">›</button>
+        <button onClick={() => onPage(pag.totalPages)} disabled={pag.page >= pag.totalPages} className="px-2 py-0.5 rounded hover:text-white/80 disabled:opacity-25 transition-colors">»</button>
+        {onPageSize && (
+          <select value={pag.pageSize} onChange={e => onPageSize(Number(e.target.value))}
+            className="ml-2 bg-white/5 border border-white/10 rounded px-1 py-0.5 text-white/40 text-[10px] cursor-pointer">
+            {[25, 50, 100].map(n => <option key={n} value={n}>{n}/pg</option>)}
+          </select>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function AdminPage() {
   const { publicKey, connecting } = useWallet()
   const { setVisible: openWalletModal } = useWalletModal()
@@ -330,82 +365,94 @@ export default function AdminPage() {
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
   const [debugAuth, setDebugAuth] = useState<DebugAuth | null>(null)
-  const [view, setView] = useState<AdminView>('pending')
-  const [rentals, setRentals] = useState<RentalOrder[]>([])
-  const [pendingOrders, setPendingOrders] = useState<RentalOrder[]>([])
-  const [approveAllConfirm, setApproveAllConfirm] = useState(false)
-  const [rejectAllConfirm, setRejectAllConfirm] = useState(false)
-  const [billingRuns, setBillingRuns] = useState<BillingRun[]>([])
-  const [epochs, setEpochs] = useState<Epoch[]>([])
+  const [view, setView] = useState<AdminView>('overview')
   const [loading, setLoading] = useState(false)
   const [actionMsg, setActionMsg] = useState('')
   const [billingRunning, setBillingRunning] = useState(false)
-  const [epochForm, setEpochForm] = useState({ totalPool: '' })
-  const [snapshotForm, setSnapshotForm] = useState({ epochId: '', wallets: '' })
-  const [topupData, setTopupData] = useState<{
-    pending: TopupRecord[]
-    confirmed: TopupRecord[]
-    unmatched: UnmatchedTx[]
-  }>({ pending: [], confirmed: [], unmatched: [] })
-  const [topupSubview, setTopupSubview] = useState<'pending' | 'confirmed' | 'unmatched'>('pending')
-  const [resetWallet, setResetWallet] = useState('')
-  const [resetState, setResetState] = useState<ResetState | null>(null)
-  const [resetConfirm1, setResetConfirm1] = useState(false)
-  const [resetConfirm2, setResetConfirm2] = useState(false)
-  const [fullBoardConfirm, setFullBoardConfirm] = useState('')
-  const [resetting, setResetting] = useState(false)
-  const defaultPricing: PricingSettings = {
-    tile_price_usd_per_day: '1',
-    free_rental_enabled: 'false',
-    free_rental_days: '0',
-    management_fee_percent: '10',
-    auto_approve_ads: 'true',
-  }
-  const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
-  const [pricingSaving, setPricingSaving] = useState(false)
-  // Distribution state
-  const [distEpochs, setDistEpochs] = useState<DistributionEpoch[]>([])
-  const [revenueEvents, setRevenueEvents] = useState<RevenueEvent[]>([])
-  const [excludedWallets, setExcludedWallets] = useState<ExcludedWallet[]>([])
-  const [distSubview, setDistSubview] = useState<'epochs' | 'events' | 'excluded'>('epochs')
-  const [snapshotRunning, setSnapshotRunning] = useState(false)
-  const [newExcludedWallet, setNewExcludedWallet] = useState('')
-  const [newExcludedLabel, setNewExcludedLabel] = useState('')
-  const [showAdvancedEpoch, setShowAdvancedEpoch] = useState(false)
-  const [currentEpochData, setCurrentEpochData] = useState<CurrentEpochData | null>(null)
-  const [epochCountdown, setEpochCountdown] = useState('')
+  const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+
+  // Rentals
+  const [rentalSubview, setRentalSubview] = useState<'pending' | 'active'>('pending')
+  const [rentals, setRentals] = useState<RentalOrder[]>([])
+  const [pendingOrders, setPendingOrders] = useState<RentalOrder[]>([])
+  const [rentalPag, setRentalPag] = useState<PagState>(initPag)
+  const [approveAllConfirm, setApproveAllConfirm] = useState(false)
+  const [rejectAllConfirm, setRejectAllConfirm] = useState(false)
+
+  // Settlements
+  const [settlements, setSettlements] = useState<SettlementRow[]>([])
+  const [settlementTotals, setSettlementTotals] = useState<SettlementTotals | null>(null)
+  const [settlementPag, setSettlementPag] = useState<PagState>(initPag)
+  const [settlementFilters, setSettlementFilters] = useState({ status: '', type: '', retryableOnly: false, dateFrom: '', dateTo: '' })
+  const [retryingSettlement, setRetryingSettlement] = useState<Record<string, boolean>>({})
+  const [retryAllRunning, setRetryAllRunning] = useState(false)
+  const [retryAllResult, setRetryAllResult] = useState<{ retried: number; succeeded: number; failed: number } | null>(null)
+
+  // Topups
+  const [topupSubview, setTopupSubview] = useState<'pending' | 'confirmed' | 'expired' | 'unmatched'>('pending')
+  const [topupRows, setTopupRows] = useState<TopupRecord[]>([])
+  const [unmatchedRows, setUnmatchedRows] = useState<UnmatchedTx[]>([])
+  const [topupPag, setTopupPag] = useState<PagState>(initPag)
+  const [topupSearch, setTopupSearch] = useState('')
   const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null)
   const [reconcileRunning, setReconcileRunning] = useState(false)
   const [txSigInputs, setTxSigInputs] = useState<Record<string, string>>({})
   const [txSigResults, setTxSigResults] = useState<Record<string, TxSigCheckResult>>({})
   const [txSigRunning, setTxSigRunning] = useState<Record<string, boolean>>({})
 
-  interface UserBalanceRow {
-    id: string
-    walletAddress: string | null
-    email: string | null
-    balance: number
-    rentalCount: number
-    topupCount: number
-    createdAt: string
-    confirmedRealTopups: number
-    mockTopups: number
-    activeDailyBurn: number
-    activeTiles: number
-  }
-  const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
+  // Accounting
   const [accountingData, setAccountingData] = useState<AccountingData | null>(null)
-  const [settlements, setSettlements] = useState<SettlementRow[]>([])
-  const [settlementTotals, setSettlementTotals] = useState<SettlementTotals | null>(null)
-  const [retryingSettlement, setRetryingSettlement] = useState<Record<string, boolean>>({})
-  const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
-  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [accountingSubview, setAccountingSubview] = useState<'cards' | 'events' | 'billing'>('cards')
   const [accountingEvents, setAccountingEvents] = useState<RevenueEventDetailed[]>([])
-  const [accountingSubview, setAccountingSubview] = useState<'cards' | 'events'>('cards')
+  const [eventPag, setEventPag] = useState<PagState>(initPag)
+  const [eventFilters, setEventFilters] = useState({ type: '', settlementStatus: '' })
+  const [billingRuns, setBillingRuns] = useState<BillingRun[]>([])
+  const [billingPag, setBillingPag] = useState<PagState>(initPag)
   const [repairing, setRepairing] = useState(false)
   const [repairMsg, setRepairMsg] = useState('')
-  const [retryAllRunning, setRetryAllRunning] = useState(false)
-  const [retryAllResult, setRetryAllResult] = useState<{ retried: number; succeeded: number; failed: number } | null>(null)
+  const [showRepairTools, setShowRepairTools] = useState(false)
+
+  // Distribution
+  const [distSubview, setDistSubview] = useState<'epochs' | 'excluded'>('epochs')
+  const [distEpochs, setDistEpochs] = useState<DistributionEpoch[]>([])
+  const [epochPag, setEpochPag] = useState<PagState>(initPag)
+  const [excludedWallets, setExcludedWallets] = useState<ExcludedWallet[]>([])
+  const [currentEpochData, setCurrentEpochData] = useState<CurrentEpochData | null>(null)
+  const [epochCountdown, setEpochCountdown] = useState('')
+  const [snapshotRunning, setSnapshotRunning] = useState(false)
+  const [newExcludedWallet, setNewExcludedWallet] = useState('')
+  const [newExcludedLabel, setNewExcludedLabel] = useState('')
+  const [showAdvancedEpoch, setShowAdvancedEpoch] = useState(false)
+  const [epochForm, setEpochForm] = useState({ totalPool: '' })
+  const [snapshotForm, setSnapshotForm] = useState({ epochId: '', wallets: '' })
+
+  // Users
+  interface UserBalanceRow {
+    id: string; walletAddress: string | null; email: string | null; balance: number
+    rentalCount: number; topupCount: number; createdAt: string
+    confirmedRealTopups: number; mockTopups: number; activeDailyBurn: number; activeTiles: number
+  }
+  const [userBalances, setUserBalances] = useState<UserBalanceRow[]>([])
+  const [userPag, setUserPag] = useState<PagState>(initPag)
+  const [userSearch, setUserSearch] = useState('')
+  const [userHasBalance, setUserHasBalance] = useState(false)
+
+  // Settings (pricing)
+  const defaultPricing: PricingSettings = {
+    tile_price_usd_per_day: '1', free_rental_enabled: 'false',
+    free_rental_days: '0', management_fee_percent: '10', auto_approve_ads: 'true',
+  }
+  const [pricingForm, setPricingForm] = useState<PricingSettings>(defaultPricing)
+  const [pricingSaving, setPricingSaving] = useState(false)
+
+  // Reset
+  const [resetWallet, setResetWallet] = useState('')
+  const [resetState, setResetState] = useState<ResetState | null>(null)
+  const [resetConfirm1, setResetConfirm1] = useState(false)
+  const [resetConfirm2, setResetConfirm2] = useState(false)
+  const [fullBoardConfirm, setFullBoardConfirm] = useState('')
+  const [resetting, setResetting] = useState(false)
   const [prelaunchConfirm, setPrelaunchConfirm] = useState('')
   const [prelaunchRunning, setPrelaunchRunning] = useState(false)
   const [prelaunchResult, setPrelaunchResult] = useState<{
@@ -413,6 +460,22 @@ export default function AdminPage() {
     holderSnapshots: number; epochs: number; billingRuns: number; rentals: number
     creatives: number; topups: number; processedTxs: number; usersBalancesZeroed: number
   } | null>(null)
+
+  // ── Pagination refs (avoid stale closures in load) ─────────────────────────
+  const rentalSubviewRef = useRef<'pending' | 'active'>('pending')
+  const rentalPageRef = useRef(1); const rentalPageSizeRef = useRef(25)
+  const settlementPageRef = useRef(1); const settlementPageSizeRef = useRef(25)
+  const settlementFiltersRef = useRef({ status: '', type: '', retryableOnly: false, dateFrom: '', dateTo: '' })
+  const topupStatusRef = useRef('pending'); const topupSearchRef = useRef('')
+  const topupPageRef = useRef(1); const topupPageSizeRef = useRef(25)
+  const accountingSubviewRef = useRef<'cards' | 'events' | 'billing'>('cards')
+  const eventPageRef = useRef(1); const eventPageSizeRef = useRef(25)
+  const eventFiltersRef = useRef({ type: '', settlementStatus: '' })
+  const billingPageRef = useRef(1); const billingPageSizeRef = useRef(25)
+  const distSubviewRef = useRef<'epochs' | 'excluded'>('epochs')
+  const epochPageRef = useRef(1); const epochPageSizeRef = useRef(25)
+  const userPageRef = useRef(1); const userPageSizeRef = useRef(25)
+  const userSearchRef = useRef(''); const userHasBalanceRef = useRef(false)
 
   // Hydration guard
   useEffect(() => { setMounted(true) }, [])
@@ -462,86 +525,109 @@ export default function AdminPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    if (view === 'pending') {
-      const res = await fetch('/api/admin?view=pending')
-      if (res.ok) {
-        const d = await res.json()
-        setPendingOrders(d.orders ?? [])
-        setApproveAllConfirm(false)
-        setRejectAllConfirm(false)
+    try {
+      if (view === 'overview') {
+        // uses global summaryData, no fetch needed
+      } else if (view === 'rentals') {
+        const sv = rentalSubviewRef.current
+        const page = rentalPageRef.current
+        const pageSize = rentalPageSizeRef.current
+        const res = await fetch(`/api/admin?view=${sv === 'pending' ? 'pending' : 'active'}&page=${page}&pageSize=${pageSize}`)
+        if (res.ok) {
+          const d = await res.json()
+          if (sv === 'pending') { setPendingOrders(d.orders ?? []); setApproveAllConfirm(false); setRejectAllConfirm(false) }
+          else setRentals(d.orders ?? [])
+          setRentalPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 })
+        }
+      } else if (view === 'settlements') {
+        const page = settlementPageRef.current; const pageSize = settlementPageSizeRef.current
+        const f = settlementFiltersRef.current
+        let url = `/api/admin?view=settlements&page=${page}&pageSize=${pageSize}`
+        if (f.status) url += `&status=${f.status}`
+        if (f.type) url += `&type=${encodeURIComponent(f.type)}`
+        if (f.retryableOnly) url += `&retryableOnly=true`
+        if (f.dateFrom) url += `&dateFrom=${f.dateFrom}`
+        if (f.dateTo) url += `&dateTo=${f.dateTo}`
+        const res = await fetch(url)
+        if (res.ok) {
+          const d = await res.json()
+          setSettlements(d.settlements ?? [])
+          if (d.totals) setSettlementTotals(d.totals)
+          setSettlementPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 })
+        }
+      } else if (view === 'topups') {
+        const status = topupStatusRef.current; const page = topupPageRef.current; const pageSize = topupPageSizeRef.current
+        const search = topupSearchRef.current
+        let url = `/api/admin?view=topups&status=${status}&page=${page}&pageSize=${pageSize}`
+        if (search) url += `&search=${encodeURIComponent(search)}`
+        const res = await fetch(url)
+        if (res.ok) {
+          const d = await res.json()
+          if (status === 'unmatched') setUnmatchedRows(d.rows ?? [])
+          else setTopupRows(d.rows ?? [])
+          setTopupPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 })
+        }
+      } else if (view === 'accounting') {
+        const sv = accountingSubviewRef.current
+        if (sv === 'cards') {
+          const res = await fetch('/api/admin?view=accounting')
+          if (res.ok) { const d = await res.json(); setAccountingData(d) }
+        } else if (sv === 'events') {
+          const page = eventPageRef.current; const pageSize = eventPageSizeRef.current
+          const f = eventFiltersRef.current
+          let url = `/api/admin?view=revenue_events&page=${page}&pageSize=${pageSize}`
+          if (f.type) url += `&type=${encodeURIComponent(f.type)}`
+          if (f.settlementStatus) url += `&settlementStatus=${f.settlementStatus}`
+          const res = await fetch(url)
+          if (res.ok) { const d = await res.json(); setAccountingEvents(d.events ?? []); setEventPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 }) }
+        } else if (sv === 'billing') {
+          const page = billingPageRef.current; const pageSize = billingPageSizeRef.current
+          const res = await fetch(`/api/admin?view=billing&page=${page}&pageSize=${pageSize}`)
+          if (res.ok) { const d = await res.json(); setBillingRuns(d.runs ?? []); setBillingPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 }) }
+        }
+      } else if (view === 'distribution') {
+        const sv = distSubviewRef.current
+        if (sv === 'epochs') {
+          const page = epochPageRef.current; const pageSize = epochPageSizeRef.current
+          const [epochsRes, currentRes] = await Promise.all([
+            fetch(`/api/admin?view=distribution&page=${page}&pageSize=${pageSize}`),
+            fetch('/api/admin?view=current_epoch'),
+          ])
+          if (epochsRes.ok) { const d = await epochsRes.json(); setDistEpochs(d.rows ?? []); setEpochPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 }) }
+          if (currentRes.ok) { const d = await currentRes.json(); setCurrentEpochData(d) }
+        } else {
+          const [excludedRes] = await Promise.all([fetch('/api/admin?view=excluded_wallets')])
+          if (excludedRes.ok) { const d = await excludedRes.json(); setExcludedWallets(d.wallets ?? []) }
+        }
+      } else if (view === 'users') {
+        const page = userPageRef.current; const pageSize = userPageSizeRef.current
+        const search = userSearchRef.current; const hasBalance = userHasBalanceRef.current
+        let url = `/api/admin?view=user_balances&page=${page}&pageSize=${pageSize}`
+        if (search) url += `&search=${encodeURIComponent(search)}`
+        if (hasBalance) url += `&hasBalance=true`
+        const res = await fetch(url)
+        if (res.ok) { const d = await res.json(); setUserBalances(d.users ?? []); setUserPag({ page: d.page ?? page, pageSize: d.pageSize ?? pageSize, totalRows: d.totalRows ?? 0, totalPages: d.totalPages ?? 1 }) }
+      } else if (view === 'settings') {
+        const [settingsRes, accountingRes] = await Promise.all([
+          fetch('/api/settings'),
+          fetch('/api/admin?view=accounting'),
+        ])
+        if (settingsRes.ok) { const d = await settingsRes.json(); setPricingForm({ ...defaultPricing, ...d.settings }) }
+        if (accountingRes.ok) { const d = await accountingRes.json(); setAccountingData(d) }
       }
-    } else if (view === 'active') {
-      const res = await fetch('/api/admin?view=active')
-      if (res.ok) {
-        const d = await res.json()
-        setRentals(d.orders ?? [])
-      }
-    } else if (view === 'billing') {
-      const res = await fetch('/api/admin?view=billing')
-      if (res.ok) {
-        const d = await res.json()
-        setBillingRuns(d.runs ?? [])
-      }
-    } else if (view === 'epochs') {
-      const res = await fetch('/api/admin?view=epochs')
-      if (res.ok) {
-        const d = await res.json()
-        setEpochs(d.epochs ?? [])
-      }
-    } else if (view === 'pricing') {
-      const res = await fetch('/api/settings')
-      if (res.ok) {
-        const d = await res.json()
-        setPricingForm({ ...defaultPricing, ...d.settings })
-      }
-    } else if (view === 'distribution') {
-      const [epochsRes, eventsRes, excludedRes, currentEpochRes] = await Promise.all([
-        fetch('/api/admin?view=distribution'),
-        fetch('/api/admin?view=revenue_events'),
-        fetch('/api/admin?view=excluded_wallets'),
-        fetch('/api/admin?view=current_epoch'),
-      ])
-      if (epochsRes.ok) { const d = await epochsRes.json(); setDistEpochs(d.epochs ?? []) }
-      if (eventsRes.ok) { const d = await eventsRes.json(); setRevenueEvents(d.events ?? []) }
-      if (excludedRes.ok) { const d = await excludedRes.json(); setExcludedWallets(d.wallets ?? []) }
-      if (currentEpochRes.ok) { const d = await currentEpochRes.json(); setCurrentEpochData(d) }
-    } else if (view === 'topups') {
-      const res = await fetch('/api/admin?view=topups')
-      if (res.ok) {
-        const d = await res.json()
-        setTopupData({
-          pending: d.pending ?? [],
-          confirmed: d.confirmed ?? [],
-          unmatched: d.unmatched ?? [],
-        })
-      }
-    } else if (view === 'users') {
-      const res = await fetch('/api/admin?view=user_balances')
-      if (res.ok) {
-        const d = await res.json()
-        setUserBalances(d.users ?? [])
-      }
-    } else if (view === 'accounting') {
-      const [accountingRes, eventsRes] = await Promise.all([
-        fetch('/api/admin?view=accounting'),
-        fetch('/api/admin?view=revenue_events'),
-      ])
-      if (accountingRes.ok) { const d = await accountingRes.json(); setAccountingData(d) }
-      if (eventsRes.ok) { const d = await eventsRes.json(); setAccountingEvents(d.events ?? []) }
-    } else if (view === 'settlements') {
-      const res = await fetch('/api/admin?view=settlements')
-      if (res.ok) {
-        const d = await res.json()
-        setSettlements(d.settlements ?? [])
-        if (d.totals) setSettlementTotals(d.totals)
-      }
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
 
   useEffect(() => {
-    if (authed) load()
+    if (authed) {
+      // Reset pagination to page 1 on view change
+      rentalPageRef.current = 1; settlementPageRef.current = 1; topupPageRef.current = 1
+      eventPageRef.current = 1; billingPageRef.current = 1; epochPageRef.current = 1; userPageRef.current = 1
+      load()
+    }
   }, [authed, load])
 
   // Load top-level summary whenever admin is authenticated
@@ -618,7 +704,7 @@ export default function AdminPage() {
     } else {
       setActionMsg(d.error ?? 'Billing failed')
     }
-    if (view === 'billing') load()
+    if (view === 'accounting') load()
   }
 
   const createEpoch = async (e: React.FormEvent) => {
@@ -835,6 +921,52 @@ export default function AdminPage() {
     } finally {
       setTxSigRunning((r) => ({ ...r, [topupId]: false }))
     }
+  }
+
+  // ── Sub-tab switchers (update ref + state + reload) ─────────────────────────
+  const switchRentalSubview = (sv: 'pending' | 'active') => {
+    rentalSubviewRef.current = sv; rentalPageRef.current = 1
+    setRentalSubview(sv); setRentalPag(initPag); load()
+  }
+  const switchAccountingSubview = (sv: 'cards' | 'events' | 'billing') => {
+    accountingSubviewRef.current = sv; setAccountingSubview(sv); load()
+  }
+  const switchDistSubview = (sv: 'epochs' | 'excluded') => {
+    distSubviewRef.current = sv; epochPageRef.current = 1; setDistSubview(sv); setEpochPag(initPag); load()
+  }
+  const switchTopupSubview = (sv: 'pending' | 'confirmed' | 'expired' | 'unmatched') => {
+    topupStatusRef.current = sv; topupPageRef.current = 1; topupSearchRef.current = ''
+    setTopupSubview(sv); setTopupPag(initPag); setTopupSearch(''); load()
+  }
+
+  // ── Pagination handlers ──────────────────────────────────────────────────────
+  const goRentalPage = (p: number, ps?: number) => { rentalPageRef.current = p; if (ps) rentalPageSizeRef.current = ps; setRentalPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goSettlementPage = (p: number, ps?: number) => { settlementPageRef.current = p; if (ps) settlementPageSizeRef.current = ps; setSettlementPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goTopupPage = (p: number, ps?: number) => { topupPageRef.current = p; if (ps) topupPageSizeRef.current = ps; setTopupPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goEventPage = (p: number, ps?: number) => { eventPageRef.current = p; if (ps) eventPageSizeRef.current = ps; setEventPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goBillingPage = (p: number, ps?: number) => { billingPageRef.current = p; if (ps) billingPageSizeRef.current = ps; setBillingPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goEpochPage = (p: number, ps?: number) => { epochPageRef.current = p; if (ps) epochPageSizeRef.current = ps; setEpochPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+  const goUserPage = (p: number, ps?: number) => { userPageRef.current = p; if (ps) userPageSizeRef.current = ps; setUserPag(prev => ({ ...prev, page: p, pageSize: ps ?? prev.pageSize })); load() }
+
+  // Apply settlement filters
+  const applySettlementFilters = (f: typeof settlementFilters) => {
+    settlementFiltersRef.current = f; settlementPageRef.current = 1
+    setSettlementFilters(f); setSettlementPag(initPag); load()
+  }
+  // Apply event filters
+  const applyEventFilters = (f: typeof eventFilters) => {
+    eventFiltersRef.current = f; eventPageRef.current = 1
+    setEventFilters(f); setEventPag(initPag); load()
+  }
+  // Apply user filters
+  const applyUserFilters = (search: string, hasBalance: boolean) => {
+    userSearchRef.current = search; userHasBalanceRef.current = hasBalance; userPageRef.current = 1
+    setUserSearch(search); setUserHasBalance(hasBalance); setUserPag(initPag); load()
+  }
+  // Topup search
+  const runTopupSearch = (search: string) => {
+    topupSearchRef.current = search; topupPageRef.current = 1
+    setTopupSearch(search); setTopupPag(initPag); load()
   }
 
   if (!mounted) {
@@ -1104,27 +1236,23 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['pending', 'active', 'billing', 'accounting', 'settlements', 'epochs', 'distribution', 'pricing', 'topups', 'users', 'reset'] as AdminView[]).map((v) => (
+        {(['overview', 'rentals', 'settlements', 'topups', 'accounting', 'distribution', 'users', 'settings', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
             className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
-              view === v
-                ? 'border-amber-400 text-amber-400'
-                : 'border-transparent text-white/40 hover:text-white'
+              view === v ? 'border-amber-400 text-amber-400' : 'border-transparent text-white/40 hover:text-white'
             }`}
           >
-            {v === 'pending' ? 'Pending Approval'
-              : v === 'active' ? 'Active Rentals'
-              : v === 'billing' ? 'Billing Runs'
-              : v === 'accounting' ? 'Accounting'
+            {v === 'overview' ? 'Overview'
+              : v === 'rentals' ? 'Rentals'
               : v === 'settlements' ? 'Settlements'
-              : v === 'epochs' ? 'Epochs (legacy)'
-              : v === 'distribution' ? 'Distribution'
-              : v === 'pricing' ? 'Pricing Settings'
               : v === 'topups' ? 'Top-ups'
+              : v === 'accounting' ? 'Accounting'
+              : v === 'distribution' ? 'Distribution'
               : v === 'users' ? 'Users'
-              : 'Testing / Reset'}
+              : v === 'settings' ? 'Settings'
+              : 'Reset'}
           </button>
         ))}
       </div>
@@ -1133,7 +1261,76 @@ export default function AdminPage() {
         <div className="text-white/30 text-sm animate-pulse">Loading…</div>
       ) : (
         <>
-          {view === 'pending' && (
+          {view === 'overview' && (
+            <div className="space-y-4">
+              {!summaryData ? (
+                <div className="text-white/30 text-sm text-center py-12 animate-pulse">Loading overview…</div>
+              ) : (
+                <>
+                  {/* Alert cards */}
+                  <div className="space-y-2">
+                    {summaryData.settlement.failedCount > 0 && (
+                      <div className="border border-red-500/30 bg-red-500/5 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+                        <div>
+                          <span className="text-red-400 font-semibold text-sm">{summaryData.settlement.failedCount} failed settlement{summaryData.settlement.failedCount !== 1 ? 's' : ''}</span>
+                          <span className="text-red-400/60 text-xs ml-2">${summaryData.settlement.failedSettlement.toFixed(2)} stuck on-chain</span>
+                        </div>
+                        <button onClick={() => setView('settlements')} className="text-xs text-red-400 hover:text-red-300 border border-red-400/30 px-3 py-1 rounded transition-colors">Go to Settlements →</button>
+                      </div>
+                    )}
+                    {summaryData.settlement.pendingCount > 0 && (
+                      <div className="border border-amber-500/20 bg-amber-500/5 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+                        <div>
+                          <span className="text-amber-400 font-semibold text-sm">{summaryData.settlement.pendingCount} pending settlement{summaryData.settlement.pendingCount !== 1 ? 's' : ''}</span>
+                          <span className="text-amber-400/60 text-xs ml-2">${summaryData.settlement.pendingSettlement.toFixed(2)} queued</span>
+                        </div>
+                        <button onClick={() => setView('settlements')} className="text-xs text-amber-400 hover:text-amber-300 border border-amber-400/30 px-3 py-1 rounded transition-colors">View →</button>
+                      </div>
+                    )}
+                    {summaryData.board.pendingTiles > 0 && (
+                      <div className="border border-amber-500/20 bg-amber-500/5 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+                        <span className="text-amber-400 font-semibold text-sm">{summaryData.board.pendingTiles} tile{summaryData.board.pendingTiles !== 1 ? 's' : ''} pending approval</span>
+                        <button onClick={() => { setView('rentals'); switchRentalSubview('pending') }} className="text-xs text-amber-400 hover:text-amber-300 border border-amber-400/30 px-3 py-1 rounded transition-colors">Review →</button>
+                      </div>
+                    )}
+                    {summaryData.settlement.failedCount === 0 && summaryData.settlement.pendingCount === 0 && summaryData.board.pendingTiles === 0 && (
+                      <div className="border border-green-500/20 bg-green-500/5 rounded-xl px-4 py-3">
+                        <span className="text-green-400 text-sm">All clear — no pending actions.</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Quick nav */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[
+                      { label: 'Active Tiles', value: summaryData.board.activeTiles.toLocaleString(), sub: `${summaryData.board.activeAds} ads`, tab: 'rentals' as AdminView, color: 'text-green-400' },
+                      { label: 'Daily Income', value: summaryData.currentBurn.freeEnabled ? 'FREE' : `$${summaryData.currentBurn.dailyIncome.toFixed(2)}`, sub: `$${summaryData.currentBurn.tilePrice}/tile/day`, tab: 'accounting' as AdminView, color: summaryData.currentBurn.freeEnabled ? 'text-amber-400' : 'text-green-400' },
+                      { label: 'Top-ups', value: `${summaryData.board.activeAdvertisers}`, sub: 'active advertisers', tab: 'topups' as AdminView, color: 'text-white/70' },
+                      { label: 'Distribution Pool', value: `$${summaryData.epoch.distributionPoolGenerated.toFixed(2)}`, sub: 'today so far', tab: 'distribution' as AdminView, color: 'text-blue-400' },
+                    ].map(({ label, value, sub, tab, color }) => (
+                      <button key={label} onClick={() => setView(tab)} className="border border-white/10 rounded-xl p-3 bg-white/2 hover:bg-white/5 transition-colors text-left">
+                        <div className={`font-mono font-bold text-lg ${color}`}>{value}</div>
+                        <div className="text-white/60 text-xs font-medium">{label}</div>
+                        <div className="text-white/25 text-[10px]">{sub}</div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {view === 'rentals' && (
+            <div className="space-y-4">
+              <div className="flex gap-1">
+                {(['pending', 'active'] as const).map(sv => (
+                  <button key={sv} onClick={() => switchRentalSubview(sv)}
+                    className={`px-3 py-1.5 text-xs rounded transition-colors ${rentalSubview === sv ? 'bg-amber-400/20 text-amber-400' : 'text-white/40 hover:text-white'}`}>
+                    {sv === 'pending' ? 'Pending Approval' : 'Active Rentals'}
+                  </button>
+                ))}
+              </div>
+              {rentalSubview === 'pending' && (
             <div className="space-y-3">
               {pendingOrders.length === 0 ? (
                 <div className="text-white/30 text-sm text-center py-12">No pending ad orders.</div>
@@ -1309,10 +1506,10 @@ export default function AdminPage() {
                   ))}
                 </>
               )}
+              <Pager pag={rentalPag} onPage={p => goRentalPage(p)} onPageSize={ps => goRentalPage(1, ps)} />
             </div>
-          )}
-
-          {view === 'active' && (
+            )}
+            {rentalSubview === 'active' && (
             <div className="space-y-3">
               {rentals.length === 0 ? (
                 <div className="text-white/30 text-sm text-center py-12">No active rentals.</div>
@@ -1424,15 +1621,43 @@ export default function AdminPage() {
                           <div className="text-white/30 text-xs mt-1">
                             Live since: {order.startDate ? new Date(order.startDate).toLocaleString() : new Date(order.createdAt).toLocaleString()}
                           </div>
-                          {order.nextBillingAt && (
-                            <div className="text-white/20 text-[10px] font-mono mt-0.5">
-                              Next billing: {new Date(order.nextBillingAt).toLocaleString()}
+                          {order.creative?.durationType ? (
+                            <div className="mt-1.5 space-y-0.5">
+                              <div className="text-[10px] font-mono text-blue-400/70">
+                                {order.creative.durationType} campaign · {order.creative.durationDays}d · ${order.creative.totalPrice?.toFixed(2)} total
+                                {(order.creative.renewalCount ?? 0) > 0 && ` · renewal #${order.creative.renewalCount}`}
+                              </div>
+                              <div className="text-[10px] font-mono text-white/30">
+                                Recognized: ${order.creative.recognizedAmount?.toFixed(2) ?? '0.00'} / ${order.creative.totalPrice?.toFixed(2)}
+                                {' · '}${order.creative.dailyRecognizedRevenue?.toFixed(2)}/day
+                              </div>
+                              {order.creative.campaignStartAt && (
+                                <div className="text-[10px] font-mono text-white/20">
+                                  Cycle: {new Date(order.creative.campaignStartAt).toLocaleDateString()} → {order.creative.campaignEndAt ? new Date(order.creative.campaignEndAt).toLocaleDateString() : '?'}
+                                </div>
+                              )}
+                              <div className="text-[10px]">
+                                <span className={`font-mono ${order.creative.autoRenew ? 'text-green-400/70' : 'text-white/30'}`}>
+                                  {order.creative.autoRenew ? 'Auto-renew ON' : 'Auto-renew OFF'}
+                                </span>
+                                {order.creative.autoRenew && order.creative.campaignEndAt && (
+                                  <span className="text-white/20 ml-1">· renews {new Date(order.creative.campaignEndAt).toLocaleDateString()}</span>
+                                )}
+                              </div>
                             </div>
-                          )}
-                          {order.lastBilledAt && (
-                            <div className="text-white/20 text-[10px] font-mono">
-                              Last billed: {new Date(order.lastBilledAt).toLocaleString()}
-                            </div>
+                          ) : (
+                            <>
+                              {order.nextBillingAt && (
+                                <div className="text-white/20 text-[10px] font-mono mt-0.5">
+                                  Next billing: {new Date(order.nextBillingAt).toLocaleString()}
+                                </div>
+                              )}
+                              {order.lastBilledAt && (
+                                <div className="text-white/20 text-[10px] font-mono">
+                                  Last billed: {new Date(order.lastBilledAt).toLocaleString()}
+                                </div>
+                              )}
+                            </>
                           )}
                         </div>
                         <div className="flex flex-col gap-1.5 flex-shrink-0">
@@ -1449,150 +1674,36 @@ export default function AdminPage() {
                   ))}
                 </>
               )}
+              <Pager pag={rentalPag} onPage={p => goRentalPage(p)} onPageSize={ps => goRentalPage(1, ps)} />
             </div>
+            )}
+          </div>
           )}
 
-          {view === 'billing' && (
-            <div className="space-y-4">
-              <div className="border border-white/5 bg-white/2 rounded-xl px-4 py-3 text-[10px] text-white/40 leading-relaxed">
-                <span className="text-amber-300/70 font-semibold">Renewal Billing History</span> — This table shows historical renewal billing runs (recurring 24h charges on existing active ads).
-                It does <em>not</em> include first-24h activation charges, which are deducted immediately when an ad is approved.
-                For all revenue events (including activation charges), see the <button onClick={() => { setView('accounting'); setAccountingSubview('events') }} className="text-amber-400 hover:text-amber-300 underline transition-colors">Accounting → Revenue Events</button> tab.
-              </div>
-              {billingRuns.length === 0 ? (
-                <div className="text-white/30 text-sm text-center py-12">
-                  No billing runs yet. Click &quot;Run daily billing&quot; above.
-                </div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-white/40 text-xs uppercase tracking-widest border-b border-white/10">
-                      <th className="pb-2 text-left font-medium">Date</th>
-                      <th className="pb-2 text-right font-medium">Tiles Billed</th>
-                      <th className="pb-2 text-right font-medium">Revenue Recognized</th>
-                      <th className="pb-2 text-right font-medium">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {billingRuns.map((r) => (
-                      <tr key={r.id} className="border-b border-white/5">
-                        <td className="py-3 text-white/70">{new Date(r.runDate).toLocaleDateString()}</td>
-                        <td className="py-3 text-right font-mono text-white/70">{r.tilesCharged}</td>
-                        <td className="py-3 text-right font-mono text-green-400" title="AD_RENT_REVENUE from this renewal run">
-                          ${Number(r.totalRevenue).toFixed(2)}
-                        </td>
-                        <td className="py-3 text-right">
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${
-                            r.status === 'completed' ? 'bg-green-400/10 text-green-400' : 'bg-amber-400/10 text-amber-400'
-                          }`}>{r.status}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-
-          {view === 'epochs' && (
-            <div className="space-y-4">
-              <div className="border border-white/5 rounded-xl p-4 bg-white/2">
-                <p className="text-white/50 text-sm">
-                  Epochs are created automatically each UTC calendar day.{' '}
-                  <button onClick={() => setView('distribution')} className="text-amber-400 hover:text-amber-300 underline transition-colors">
-                    Use the Distribution tab
-                  </button>{' '}
-                  to manage epochs, run snapshots, and publish claim pools.
-                </p>
-              </div>
-
-              {/* Advanced / Developer section */}
-              <div className="border border-white/5 rounded-xl overflow-hidden">
-                <button
-                  onClick={() => setShowAdvancedEpoch((v) => !v)}
-                  className="w-full flex items-center justify-between px-4 py-3 text-xs text-white/30 hover:text-white/50 transition-colors"
-                >
-                  <span className="uppercase tracking-widest">Advanced / Developer</span>
-                  <span>{showAdvancedEpoch ? '▲' : '▼'}</span>
-                </button>
-                {showAdvancedEpoch && (
-                  <div className="px-4 pb-4 space-y-5 border-t border-white/5">
-                    <div className="pt-4">
-                      <h3 className="text-sm font-bold text-white mb-1">Create epoch manually</h3>
-                      <p className="text-white/30 text-xs mb-3">Only for testing or recovery. Daily epochs are auto-created.</p>
-                      <form onSubmit={createEpoch} className="flex gap-3">
-                        <input
-                          type="number" min="0" step="0.01"
-                          value={epochForm.totalPool}
-                          onChange={(e) => setEpochForm({ totalPool: e.target.value })}
-                          placeholder="Total pool (USDC)"
-                          className="flex-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-amber-400"
-                        />
-                        <button type="submit" disabled={!epochForm.totalPool}
-                          className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-sm px-4 py-2 rounded transition-colors disabled:opacity-50">
-                          Create
-                        </button>
-                      </form>
-                    </div>
-                    <div className="pt-2 border-t border-white/5">
-                      <h3 className="text-sm font-bold text-white mb-1">Mock holder snapshot</h3>
-                      <p className="text-white/30 text-xs mb-3">Enter wallets as &quot;wallet_address:token_balance&quot; per line.</p>
-                      <form onSubmit={submitSnapshot} className="space-y-3">
-                        <input
-                          value={snapshotForm.epochId}
-                          onChange={(e) => setSnapshotForm((f) => ({ ...f, epochId: e.target.value }))}
-                          placeholder="Epoch ID"
-                          className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
-                        />
-                        <textarea
-                          value={snapshotForm.wallets}
-                          onChange={(e) => setSnapshotForm((f) => ({ ...f, wallets: e.target.value }))}
-                          placeholder={'9xYz…wallet1:1000000\n7aBC…wallet2:500000'}
-                          rows={4}
-                          className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
-                        />
-                        <button type="submit" disabled={!snapshotForm.epochId}
-                          className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 text-xs px-4 py-2 rounded transition-colors disabled:opacity-50">
-                          Take snapshot
-                        </button>
-                      </form>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {view === 'topups' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex gap-1">
-                  {(['pending', 'confirmed', 'unmatched'] as const).map((sv) => (
-                    <button
-                      key={sv}
-                      onClick={() => setTopupSubview(sv)}
-                      className={`px-3 py-1.5 text-xs rounded transition-colors ${
-                        topupSubview === sv
-                          ? 'bg-amber-400/20 text-amber-400'
-                          : 'text-white/40 hover:text-white'
-                      }`}
-                    >
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex gap-1 flex-wrap">
+                  {(['pending', 'confirmed', 'expired', 'unmatched'] as const).map((sv) => (
+                    <button key={sv} onClick={() => switchTopupSubview(sv)}
+                      className={`px-3 py-1.5 text-xs rounded transition-colors ${topupSubview === sv ? 'bg-amber-400/20 text-amber-400' : 'text-white/40 hover:text-white'}`}>
                       {sv.charAt(0).toUpperCase() + sv.slice(1)}
-                      <span className="ml-1.5 text-[10px] text-white/30">
-                        ({sv === 'pending' ? topupData.pending.length
-                          : sv === 'confirmed' ? topupData.confirmed.length
-                          : topupData.unmatched.length})
-                      </span>
                     </button>
                   ))}
                 </div>
-                <button
-                  onClick={runReconcile}
-                  disabled={reconcileRunning}
-                  className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
-                >
-                  {reconcileRunning ? 'Running…' : 'Run reconciliation'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <input value={topupSearch} onChange={e => setTopupSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && runTopupSearch(topupSearch)}
+                    placeholder="Search wallet/tx…" className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400 w-44 placeholder-white/20" />
+                  <button onClick={() => runTopupSearch(topupSearch)} className="text-xs bg-white/10 hover:bg-white/20 text-white/60 px-2 py-1 rounded transition-colors">Search</button>
+                  <button
+                    onClick={runReconcile}
+                    disabled={reconcileRunning}
+                    className="text-xs bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                  >
+                    {reconcileRunning ? 'Running…' : 'Run reconciliation'}
+                  </button>
+                </div>
               </div>
 
               {/* Reconcile result panel */}
@@ -1639,11 +1750,11 @@ export default function AdminPage() {
                 </div>
               )}
 
-              {topupSubview === 'pending' && (
+              {topupSubview !== 'unmatched' && (
                 <div className="space-y-2">
-                  {topupData.pending.length === 0 ? (
-                    <p className="text-white/30 text-sm text-center py-8">No pending top-ups.</p>
-                  ) : topupData.pending.map((t) => (
+                  {topupRows.length === 0 ? (
+                    <p className="text-white/30 text-sm text-center py-8">No {topupSubview} top-ups.</p>
+                  ) : topupRows.map((t) => (
                     <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
                       {/* Header */}
                       <div className="flex items-start justify-between gap-2">
@@ -1737,47 +1848,15 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ))}
-                </div>
-              )}
-
-              {topupSubview === 'confirmed' && (
-                <div className="space-y-2">
-                  {topupData.confirmed.length === 0 ? (
-                    <p className="text-white/30 text-sm text-center py-8">No confirmed top-ups.</p>
-                  ) : topupData.confirmed.map((t) => (
-                    <div key={t.id} className="border border-white/10 rounded-xl p-4 bg-white/2 flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-0.5 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-400/10 text-green-400">CONFIRMED</span>
-                          <span className="text-white font-mono font-bold text-sm">
-                            ${Number(t.actualAmount ?? t.amount).toFixed(2)} USDC
-                          </span>
-                          <span className="text-white/50 text-xs">{t.user.email ?? t.userId}</span>
-                        </div>
-                        {t.txSignature && (
-                          <a
-                            href={`https://solscan.io/tx/${t.txSignature}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-[10px] text-blue-400/70 hover:text-blue-400 font-mono block"
-                          >
-                            {t.txSignature.slice(0, 16)}… ↗
-                          </a>
-                        )}
-                        <div className="text-white/30 text-[10px]">
-                          {t.confirmedAt ? new Date(t.confirmedAt).toLocaleString() : ''}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                  <Pager pag={topupPag} onPage={p => goTopupPage(p)} onPageSize={ps => goTopupPage(1, ps)} />
                 </div>
               )}
 
               {topupSubview === 'unmatched' && (
                 <div className="space-y-2">
-                  {topupData.unmatched.length === 0 ? (
+                  {unmatchedRows.length === 0 ? (
                     <p className="text-white/30 text-sm text-center py-8">No unmatched transactions.</p>
-                  ) : topupData.unmatched.map((tx) => (
+                  ) : unmatchedRows.map((tx) => (
                     <div key={tx.id} className="border border-white/10 rounded-xl p-4 bg-white/2 space-y-1">
                       <div className="flex items-center gap-2">
                         <span className="text-white font-mono font-bold text-sm">
@@ -1800,12 +1879,13 @@ export default function AdminPage() {
                       </p>
                     </div>
                   ))}
+                  <Pager pag={topupPag} onPage={p => goTopupPage(p)} onPageSize={ps => goTopupPage(1, ps)} />
                 </div>
               )}
             </div>
           )}
 
-          {view === 'pricing' && (
+          {view === 'settings' && (
             <div className="max-w-lg">
               <form onSubmit={savePricing} className="space-y-5">
                 <div className="border border-white/10 rounded-xl p-5 bg-white/2 space-y-4">
@@ -1910,6 +1990,45 @@ export default function AdminPage() {
                   {pricingSaving ? 'Saving…' : 'Save pricing settings'}
                 </button>
               </form>
+
+              {/* Wallet diagnostics (from accounting) */}
+              {accountingData && (
+                <div className="mt-6 border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+                  <h3 className="text-xs font-bold text-white/50 uppercase tracking-widest">Wallet Configuration</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {[
+                      { label: 'Treasury Wallet', addr: accountingData.walletConfig.treasuryWallet },
+                      { label: 'Distribution Wallet', addr: accountingData.walletConfig.distributionWallet },
+                      { label: 'Admin Wallet', addr: accountingData.walletConfig.adminWallet },
+                    ].map(({ label, addr }) => (
+                      <div key={label} className="flex items-center justify-between gap-2 bg-white/3 rounded px-3 py-1.5">
+                        <span className="text-white/40">{label}</span>
+                        <span className={`font-mono text-[10px] ${addr ? 'text-white/50' : 'text-red-400/50'}`}>{addr ? `${addr.slice(0,6)}…${addr.slice(-4)}` : 'not set'}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="space-y-2 text-xs">
+                    {([
+                      { label: 'Top-Up Wallet', addr: accountingData.walletConfig.topupWallet, diag: accountingData.walletConfig.topupKeyDiag },
+                      { label: 'Revenue Wallet', addr: accountingData.walletConfig.revenueWallet, diag: accountingData.walletConfig.revenueKeyDiag },
+                      { label: 'Fee Creator Wallet', addr: accountingData.walletConfig.feeCreatorWallet, diag: accountingData.walletConfig.feeCreatorKeyDiag },
+                    ] as { label: string; addr: string | null; diag: KeyDiagnostic }[]).map(({ label, addr, diag }) => (
+                      <div key={label} className="bg-white/3 rounded px-3 py-2 space-y-1">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-white/50">{label}</span>
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${diag.present ? 'bg-white/10 text-white/50' : 'bg-amber-500/15 text-amber-400/70'}`}>{diag.present ? 'key set' : 'no key'}</span>
+                            {diag.present && <span className={`text-[10px] px-1.5 py-0.5 rounded ${diag.parseStatus === 'ok' ? 'bg-green-500/15 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{diag.parseStatus === 'ok' ? 'parse ✓' : 'parse ✗'}</span>}
+                            {diag.parseStatus === 'ok' && diag.matches !== null && <span className={`text-[10px] px-1.5 py-0.5 rounded ${diag.matches ? 'bg-green-500/20 text-green-400' : 'bg-red-500/25 text-red-400 font-bold'}`}>{diag.matches ? 'match ✓' : 'MISMATCH ✗'}</span>}
+                            <span className={`font-mono text-[10px] ${addr ? 'text-white/50' : 'text-red-400/50'}`}>{addr ? `${addr.slice(0,6)}…${addr.slice(-4)}` : 'not set'}</span>
+                          </div>
+                        </div>
+                        {diag.error && <div className={`text-[10px] rounded px-2 py-1 ${diag.matches === false ? 'bg-red-500/10 text-red-400/80 border border-red-500/20' : 'bg-amber-500/10 text-amber-400/80 border border-amber-500/15'}`}>{diag.error}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1917,17 +2036,10 @@ export default function AdminPage() {
             <div className="space-y-4">
               {/* Sub-tab bar */}
               <div className="flex gap-1">
-                {(['epochs', 'events', 'excluded'] as const).map((sv) => (
-                  <button
-                    key={sv}
-                    onClick={() => setDistSubview(sv)}
-                    className={`px-3 py-1.5 text-xs rounded transition-colors ${
-                      distSubview === sv ? 'bg-amber-400/20 text-amber-400' : 'text-white/40 hover:text-white'
-                    }`}
-                  >
-                    {sv === 'epochs' ? `Epochs (${distEpochs.length})`
-                      : sv === 'events' ? `Revenue Events (${revenueEvents.length})`
-                      : `Excluded Wallets (${excludedWallets.length})`}
+                {(['epochs', 'excluded'] as const).map((sv) => (
+                  <button key={sv} onClick={() => switchDistSubview(sv)}
+                    className={`px-3 py-1.5 text-xs rounded transition-colors ${distSubview === sv ? 'bg-amber-400/20 text-amber-400' : 'text-white/40 hover:text-white'}`}>
+                    {sv === 'epochs' ? `Epochs (${epochPag.totalRows || distEpochs.length})` : `Excluded Wallets (${excludedWallets.length})`}
                   </button>
                 ))}
               </div>
@@ -2096,48 +2208,13 @@ export default function AdminPage() {
                             })}
                           </tbody>
                         </table>
+                        <Pager pag={epochPag} onPage={p => goEpochPage(p)} onPageSize={ps => goEpochPage(1, ps)} />
                       </div>
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Revenue Events sub-tab */}
-              {distSubview === 'events' && (
-                <div className="space-y-2">
-                  {revenueEvents.length === 0 ? (
-                    <p className="text-white/30 text-sm text-center py-8">No revenue events yet.</p>
-                  ) : revenueEvents.map((ev) => {
-                    const typeColor =
-                      ev.type === 'AD_RENT_REVENUE' ? 'text-green-400 bg-green-400/10'
-                      : ev.type === 'TRADING_FEE_REVENUE' ? 'text-blue-400 bg-blue-400/10'
-                      : ev.type === 'MANAGEMENT_FEE' ? 'text-white/50 bg-white/5'
-                      : ev.type === 'CLAIM_POOL_ALLOCATION' ? 'text-amber-400 bg-amber-400/10'
-                      : ev.type === 'CLAIM_PAYOUT' ? 'text-green-400 bg-green-400/10'
-                      : ev.type === 'TOPUP_DEPOSIT' ? 'text-blue-300 bg-blue-300/10'
-                      : 'text-white/40 bg-white/5'
-                    return (
-                      <div key={ev.id} className="border border-white/5 rounded-lg px-4 py-2.5 bg-white/2 flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium flex-shrink-0 ${typeColor}`}>
-                            {ev.type.replace(/_/g, ' ')}
-                          </span>
-                          <span className="text-white/25 text-[10px]">{ev.source}</span>
-                          {ev.txSignature && (
-                            <span className="text-white/20 text-[10px] font-mono truncate hidden sm:block">
-                              {ev.txSignature.slice(0, 10)}…
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 flex-shrink-0">
-                          <span className="font-mono font-bold text-sm text-white">${Number(ev.amount).toFixed(4)}</span>
-                          <span className="text-white/25 text-[10px]">{new Date(ev.createdAt).toLocaleDateString()}</span>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
 
               {/* Excluded Wallets sub-tab */}
               {distSubview === 'excluded' && (
@@ -2210,8 +2287,29 @@ export default function AdminPage() {
 
           {view === 'users' && (
             <div className="space-y-4">
-              <div className="text-xs text-white/40 mb-2">
-                Advertiser accounts — internal USDC balance, real vs mock topups, active burn rate.
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  <input
+                    value={userSearch}
+                    onChange={e => setUserSearch(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && applyUserFilters(userSearch, userHasBalance)}
+                    placeholder="Search wallet or email…"
+                    className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1.5 text-white text-xs focus:outline-none focus:border-amber-400 placeholder-white/20 max-w-xs"
+                  />
+                  <button onClick={() => applyUserFilters(userSearch, userHasBalance)}
+                    className="text-xs bg-white/10 hover:bg-white/20 text-white/60 px-2 py-1.5 rounded transition-colors">Search</button>
+                  {userSearch && (
+                    <button onClick={() => applyUserFilters('', userHasBalance)}
+                      className="text-xs text-white/30 hover:text-white transition-colors">✕</button>
+                  )}
+                </div>
+                <label className="flex items-center gap-1.5 text-xs text-white/50 cursor-pointer">
+                  <input type="checkbox" checked={userHasBalance}
+                    onChange={e => applyUserFilters(userSearch, e.target.checked)}
+                    className="w-3.5 h-3.5 accent-amber-400" />
+                  Has balance
+                </label>
+                <span className="text-xs text-white/30">{userPag.totalRows > 0 ? `${userPag.totalRows} users` : ''}</span>
               </div>
               {userBalances.length === 0 ? (
                 <p className="text-white/30 text-sm text-center py-8">No advertiser accounts found.</p>
@@ -2263,6 +2361,7 @@ export default function AdminPage() {
                       ))}
                     </tbody>
                   </table>
+                  <Pager pag={userPag} onPage={p => goUserPage(p)} onPageSize={ps => goUserPage(1, ps)} />
                 </div>
               )}
             </div>
@@ -2521,30 +2620,55 @@ export default function AdminPage() {
                   </div>
 
                   {/* Sub-tab toggle */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setAccountingSubview('cards')}
-                      className={`text-xs px-3 py-1.5 rounded transition-colors ${accountingSubview === 'cards' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-white/5 text-white/40 hover:text-white border border-white/10'}`}
-                    >
-                      Summary Cards
-                    </button>
-                    <button
-                      onClick={() => setAccountingSubview('events')}
-                      className={`text-xs px-3 py-1.5 rounded transition-colors ${accountingSubview === 'events' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-white/5 text-white/40 hover:text-white border border-white/10'}`}
-                    >
-                      Revenue Events ({accountingEvents.length})
-                    </button>
+                  <div className="flex gap-2 flex-wrap">
+                    {(['cards', 'events', 'billing'] as const).map(sv => (
+                      <button key={sv} onClick={() => switchAccountingSubview(sv)}
+                        className={`text-xs px-3 py-1.5 rounded transition-colors ${accountingSubview === sv ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-white/5 text-white/40 hover:text-white border border-white/10'}`}>
+                        {sv === 'cards' ? 'Summary Cards' : sv === 'events' ? `Revenue Events (${eventPag.totalRows || accountingEvents.length})` : `Billing Runs (${billingPag.totalRows || billingRuns.length})`}
+                      </button>
+                    ))}
                     <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-4 py-2 rounded transition-colors ml-auto">
                       Refresh
                     </button>
                   </div>
 
                   {accountingSubview === 'events' && (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <p className="text-[10px] text-white/30">
                         All revenue events — AD_RENT_REVENUE includes both activation and renewal charges.
                         TOPUP_DEPOSIT is prepaid balance, not revenue.
                       </p>
+                      {/* Event filters */}
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div className="flex flex-col gap-0.5">
+                          <label className="text-[10px] text-white/30 uppercase tracking-widest">Type</label>
+                          <select value={eventFilters.type}
+                            onChange={e => applyEventFilters({ ...eventFilters, type: e.target.value })}
+                            className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400">
+                            <option value="">All types</option>
+                            <option value="AD_RENT_REVENUE">AD_RENT_REVENUE</option>
+                            <option value="TRADING_FEE_REVENUE">TRADING_FEE_REVENUE</option>
+                            <option value="TOPUP_DEPOSIT">TOPUP_DEPOSIT</option>
+                          </select>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <label className="text-[10px] text-white/30 uppercase tracking-widest">Settlement</label>
+                          <select value={eventFilters.settlementStatus}
+                            onChange={e => applyEventFilters({ ...eventFilters, settlementStatus: e.target.value })}
+                            className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400">
+                            <option value="">Any</option>
+                            <option value="UNSETTLED">Unsettled</option>
+                            <option value="PARTIAL">Partial</option>
+                            <option value="FAILED">Failed</option>
+                            <option value="SETTLED">Settled</option>
+                            <option value="none">No settlement</option>
+                          </select>
+                        </div>
+                        {(eventFilters.type || eventFilters.settlementStatus) && (
+                          <button onClick={() => applyEventFilters({ type: '', settlementStatus: '' })}
+                            className="text-xs text-white/30 hover:text-white transition-colors pb-1">Clear</button>
+                        )}
+                      </div>
                       {accountingEvents.length === 0 ? (
                         <p className="text-white/20 text-xs text-center py-8">No revenue events yet.</p>
                       ) : (
@@ -2627,6 +2751,47 @@ export default function AdminPage() {
                               })}
                             </tbody>
                           </table>
+                          <Pager pag={eventPag} onPage={p => goEventPage(p)} onPageSize={ps => goEventPage(1, ps)} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {accountingSubview === 'billing' && (
+                    <div className="space-y-3">
+                      <div className="border border-white/5 bg-white/2 rounded-xl px-4 py-3 text-[10px] text-white/40 leading-relaxed">
+                        <span className="text-amber-300/70 font-semibold">Renewal Billing History</span> — Historical renewal billing runs (recurring 24h charges on active ads).
+                        Does not include first-24h activation charges. See <button onClick={() => switchAccountingSubview('events')} className="text-amber-400 hover:text-amber-300 underline transition-colors">Revenue Events</button> for all charges.
+                      </div>
+                      {billingRuns.length === 0 ? (
+                        <p className="text-white/30 text-sm text-center py-12">No billing runs yet.</p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="text-white/40 text-xs uppercase tracking-widest border-b border-white/10">
+                                <th className="pb-2 text-left font-medium">Date</th>
+                                <th className="pb-2 text-right font-medium">Tiles Billed</th>
+                                <th className="pb-2 text-right font-medium">Revenue Recognized</th>
+                                <th className="pb-2 text-right font-medium">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {billingRuns.map((r) => (
+                                <tr key={r.id} className="border-b border-white/5">
+                                  <td className="py-3 text-white/70">{new Date(r.runDate).toLocaleDateString()}</td>
+                                  <td className="py-3 text-right font-mono text-white/70">{r.tilesCharged}</td>
+                                  <td className="py-3 text-right font-mono text-green-400">${Number(r.totalRevenue).toFixed(2)}</td>
+                                  <td className="py-3 text-right">
+                                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                      r.status === 'completed' ? 'bg-green-400/10 text-green-400' : 'bg-amber-400/10 text-amber-400'
+                                    }`}>{r.status}</span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <Pager pag={billingPag} onPage={p => goBillingPage(p)} onPageSize={ps => goBillingPage(1, ps)} />
                         </div>
                       )}
                     </div>
@@ -2638,6 +2803,58 @@ export default function AdminPage() {
 
           {view === 'settlements' && (
             <div className="space-y-4">
+              {/* Filter bar */}
+              <div className="flex flex-wrap items-end gap-2 p-3 bg-white/2 border border-white/10 rounded-xl">
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-[10px] text-white/30 uppercase tracking-widest">Status</label>
+                  <select
+                    value={settlementFilters.status}
+                    onChange={e => applySettlementFilters({ ...settlementFilters, status: e.target.value })}
+                    className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400"
+                  >
+                    <option value="">All</option>
+                    <option value="UNSETTLED">Unsettled</option>
+                    <option value="PARTIAL">Partial</option>
+                    <option value="FAILED">Failed</option>
+                    <option value="SETTLED">Settled</option>
+                  </select>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-[10px] text-white/30 uppercase tracking-widest">Type</label>
+                  <select
+                    value={settlementFilters.type}
+                    onChange={e => applySettlementFilters({ ...settlementFilters, type: e.target.value })}
+                    className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400"
+                  >
+                    <option value="">All types</option>
+                    <option value="AD_RENT_REVENUE">AD_RENT_REVENUE</option>
+                    <option value="TRADING_FEE_REVENUE">TRADING_FEE_REVENUE</option>
+                  </select>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-[10px] text-white/30 uppercase tracking-widest">From</label>
+                  <input type="date" value={settlementFilters.dateFrom}
+                    onChange={e => applySettlementFilters({ ...settlementFilters, dateFrom: e.target.value })}
+                    className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400" />
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-[10px] text-white/30 uppercase tracking-widest">To</label>
+                  <input type="date" value={settlementFilters.dateTo}
+                    onChange={e => applySettlementFilters({ ...settlementFilters, dateTo: e.target.value })}
+                    className="bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400" />
+                </div>
+                <label className="flex items-center gap-1.5 text-xs text-white/50 cursor-pointer pb-1">
+                  <input type="checkbox" checked={settlementFilters.retryableOnly}
+                    onChange={e => applySettlementFilters({ ...settlementFilters, retryableOnly: e.target.checked })}
+                    className="w-3.5 h-3.5 accent-amber-400" />
+                  Retryable only
+                </label>
+                {(settlementFilters.status || settlementFilters.type || settlementFilters.retryableOnly || settlementFilters.dateFrom || settlementFilters.dateTo) && (
+                  <button onClick={() => applySettlementFilters({ status: '', type: '', retryableOnly: false, dateFrom: '', dateTo: '' })}
+                    className="text-xs text-white/30 hover:text-white transition-colors pb-1">Clear filters</button>
+                )}
+              </div>
+
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <p className="text-xs text-white/40">
                   One settlement record per revenue event. Retry sends only missing legs.
@@ -2705,6 +2922,7 @@ export default function AdminPage() {
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
+
                     <thead>
                       <tr className="text-white/30 uppercase tracking-widest border-b border-white/10">
                         <th className="pb-2 text-left font-medium pr-3 whitespace-nowrap">Date</th>
@@ -2852,6 +3070,7 @@ export default function AdminPage() {
                       })}
                     </tbody>
                   </table>
+                  <Pager pag={settlementPag} onPage={p => goSettlementPage(p)} onPageSize={ps => goSettlementPage(1, ps)} />
                 </div>
               )}
             </div>

@@ -18,34 +18,10 @@ export async function GET(req: Request) {
   const now = new Date()
   const periodStart = utcDayStart(now)
   const periodEnd = new Date(periodStart.getTime() + 24 * 60 * 60 * 1000 - 1)
-
-  // Find active campaigns due for recognition
-  const campaigns = await prisma.adCreative.findMany({
-    where: {
-      campaignStatus: 'ACTIVE',
-      nextRecognitionAt: { lte: now },
-      campaignEndAt: { gt: now },
-      durationType: { not: null },
-    },
-    select: {
-      id: true,
-      userId: true,
-      durationType: true,
-      durationDays: true,
-      totalPrice: true,
-      recognizedAmount: true,
-      dailyRecognizedRevenue: true,
-      campaignEndAt: true,
-    },
-  })
-
-  if (campaigns.length === 0) {
-    return NextResponse.json({ recognized: 0, results: [] })
-  }
-
   const epoch = await getOrCreateEpoch(periodStart)
 
-  const results: Array<{
+  // ── Phase 1: daily recognition for active in-progress campaigns ──────────────
+  const recognitionResults: Array<{
     creativeId: string
     status: string
     ok: boolean
@@ -53,9 +29,25 @@ export async function GET(req: Request) {
     error?: string
   }> = []
 
-  for (const campaign of campaigns) {
+  const activeCampaigns = await prisma.adCreative.findMany({
+    where: {
+      campaignStatus: 'ACTIVE',
+      durationType: { not: null },
+      nextRecognitionAt: { lte: now },
+      campaignEndAt: { gt: now },
+    },
+    select: {
+      id: true,
+      userId: true,
+      durationType: true,
+      totalPrice: true,
+      recognizedAmount: true,
+      dailyRecognizedRevenue: true,
+    },
+  })
+
+  for (const campaign of activeCampaigns) {
     try {
-      // Check if already recognized for this period (idempotency)
       const existing = await prisma.campaignRevenueRecognition.findUnique({
         where: {
           creativeId_recognitionPeriodStart: {
@@ -65,28 +57,22 @@ export async function GET(req: Request) {
         },
       })
       if (existing) {
-        results.push({ creativeId: campaign.id, status: 'ALREADY_RECOGNIZED', ok: true, amount: 0 })
+        recognitionResults.push({ creativeId: campaign.id, status: 'ALREADY_RECOGNIZED', ok: true, amount: 0 })
         continue
       }
 
       const totalPrice = Number(campaign.totalPrice ?? 0)
       const recognized = Number(campaign.recognizedAmount ?? 0)
       const daily = Number(campaign.dailyRecognizedRevenue ?? 0)
-
-      // Never recognize more than totalPrice
       const remaining = totalPrice - recognized
-      if (remaining <= 0) {
-        await prisma.adCreative.update({
-          where: { id: campaign.id },
-          data: { campaignStatus: 'COMPLETED' },
-        })
-        results.push({ creativeId: campaign.id, status: 'COMPLETED', ok: true, amount: 0 })
+
+      if (remaining <= 0.001) {
+        // All revenue recognized for this cycle; wait for Phase 2 to handle renewal at endAt
+        recognitionResults.push({ creativeId: campaign.id, status: 'CYCLE_COMPLETE_PENDING_RENEWAL', ok: true, amount: 0 })
         continue
       }
 
       const amountToRecognize = Math.min(daily, remaining)
-      const isLastDay = remaining - amountToRecognize <= 0.001
-
       const nextRecognitionAt = new Date(periodStart.getTime() + 24 * 60 * 60 * 1000)
 
       const { revenueEvent } = await prisma.$transaction(async (tx) => {
@@ -122,8 +108,7 @@ export async function GET(req: Request) {
           data: {
             recognizedAmount: { increment: amountToRecognize },
             lastRecognizedAt: now,
-            nextRecognitionAt: isLastDay ? null : nextRecognitionAt,
-            campaignStatus: isLastDay ? 'COMPLETED' : 'ACTIVE',
+            nextRecognitionAt,
           },
         })
 
@@ -134,9 +119,9 @@ export async function GET(req: Request) {
         console.error('[settlement] recognition error', revenueEvent.id, err)
       )
 
-      results.push({ creativeId: campaign.id, status: isLastDay ? 'COMPLETED' : 'RECOGNIZED', ok: true, amount: amountToRecognize })
+      recognitionResults.push({ creativeId: campaign.id, status: 'RECOGNIZED', ok: true, amount: amountToRecognize })
     } catch (err) {
-      results.push({
+      recognitionResults.push({
         creativeId: campaign.id,
         status: 'ERROR',
         ok: false,
@@ -145,38 +130,197 @@ export async function GET(req: Request) {
     }
   }
 
-  // Expire campaigns past their endAt (including any that were missed)
-  await prisma.adCreative.updateMany({
+  // ── Phase 2: renewal / expiry for campaigns that have reached their endAt ────
+  const renewalResults: Array<{
+    creativeId: string
+    status: string
+    ok: boolean
+    error?: string
+  }> = []
+
+  const endedCampaigns = await prisma.adCreative.findMany({
     where: {
       campaignStatus: 'ACTIVE',
+      durationType: { not: null },
       campaignEndAt: { lte: now },
     },
-    data: { campaignStatus: 'EXPIRED' },
+    select: {
+      id: true,
+      userId: true,
+      durationType: true,
+      durationDays: true,
+      totalPrice: true,
+      dailyRecognizedRevenue: true,
+      campaignEndAt: true,
+      autoRenew: true,
+      renewalCount: true,
+    },
   })
 
-  // Expire corresponding rentals
-  const expiredCreatives = await prisma.adCreative.findMany({
-    where: { campaignStatus: { in: ['COMPLETED', 'EXPIRED'] }, durationType: { not: null } },
-    select: { id: true },
-  })
-  if (expiredCreatives.length > 0) {
-    await prisma.adRental.updateMany({
-      where: {
-        creativeId: { in: expiredCreatives.map((c) => c.id) },
-        status: 'ACTIVE',
-      },
-      data: { status: 'EXPIRED', endDate: now },
-    })
+  for (const campaign of endedCampaigns) {
+    try {
+      const cycleEndAt = campaign.campaignEndAt!
+
+      // Idempotency: skip if already processed this cycle end
+      const alreadyRenewed = await prisma.campaignRenewal.findUnique({
+        where: { creativeId_cycleEndAt: { creativeId: campaign.id, cycleEndAt } },
+      })
+      if (alreadyRenewed) {
+        renewalResults.push({ creativeId: campaign.id, status: 'ALREADY_PROCESSED', ok: true })
+        continue
+      }
+
+      const shouldRenew = campaign.autoRenew
+
+      if (shouldRenew) {
+        const wallet = await prisma.advertiserWallet.findUnique({ where: { userId: campaign.userId } })
+        const totalPrice = Number(campaign.totalPrice ?? 0)
+        const balanceCents = Math.round(Number(wallet?.usdcBalance ?? 0) * 100)
+        const requiredCents = Math.round(totalPrice * 100)
+
+        if (!wallet || balanceCents < requiredCents) {
+          // Insufficient balance — expire
+          await expireCampaign(campaign.id, now)
+          renewalResults.push({ creativeId: campaign.id, status: 'EXPIRED_INSUFFICIENT_BALANCE', ok: true })
+          continue
+        }
+
+        // Renew: extend campaign by same duration
+        const durationMs = (campaign.durationDays ?? 1) * 24 * 60 * 60 * 1000
+        const newCycleStartAt = cycleEndAt
+        const newCampaignEndAt = new Date(cycleEndAt.getTime() + durationMs)
+        const newNextRecognitionAt = new Date(periodStart.getTime() + 24 * 60 * 60 * 1000) // tomorrow
+        const newCycleNumber = campaign.renewalCount + 1
+
+        const revenueEvent = await prisma.$transaction(async (tx) => {
+          // Deduct full campaign price
+          await tx.advertiserWallet.update({
+            where: { userId: campaign.userId },
+            data: { usdcBalance: { decrement: totalPrice } },
+          })
+
+          // Idempotency record for this renewal
+          await tx.campaignRenewal.create({
+            data: {
+              creativeId: campaign.id,
+              cycleNumber: newCycleNumber,
+              cycleStartAt: newCycleStartAt,
+              cycleEndAt,
+              totalPrice,
+            },
+          })
+
+          // Reset cycle on the creative
+          await tx.adCreative.update({
+            where: { id: campaign.id },
+            data: {
+              campaignStatus: 'ACTIVE',
+              campaignStartAt: newCycleStartAt,
+              campaignEndAt: newCampaignEndAt,
+              recognizedAmount: 0,
+              lastRecognizedAt: now,
+              nextRecognitionAt: newNextRecognitionAt,
+              renewalCount: { increment: 1 },
+            },
+          })
+
+          // First recognition event for the new cycle (today's period)
+          // Phase 1 skipped this campaign because campaignEndAt <= now, so today's slot is free
+          const revenueEvent = await tx.revenueEvent.create({
+            data: {
+              type: 'AD_RENT_REVENUE',
+              source: 'activation',
+              amount: Number(campaign.dailyRecognizedRevenue ?? 0),
+              currency: 'USDC',
+              epochId: epoch.id,
+              userId: campaign.userId,
+              metadata: {
+                creativeId: campaign.id,
+                durationType: campaign.durationType,
+                renewal: true,
+                cycleNumber: newCycleNumber,
+                periodStart: periodStart.toISOString(),
+              },
+            },
+          })
+
+          await tx.campaignRevenueRecognition.create({
+            data: {
+              creativeId: campaign.id,
+              recognitionPeriodStart: periodStart,
+              recognitionPeriodEnd: periodEnd,
+              amount: Number(campaign.dailyRecognizedRevenue ?? 0),
+              revenueEventId: revenueEvent.id,
+            },
+          })
+
+          // Update recognizedAmount for day 1 of new cycle
+          await tx.adCreative.update({
+            where: { id: campaign.id },
+            data: { recognizedAmount: Number(campaign.dailyRecognizedRevenue ?? 0) },
+          })
+
+          return revenueEvent
+        })
+
+        void settleRevenueEvent(revenueEvent.id).catch((err) =>
+          console.error('[settlement] renewal error', revenueEvent.id, err)
+        )
+
+        renewalResults.push({ creativeId: campaign.id, status: 'RENEWED', ok: true })
+      } else {
+        // autoRenew = false → expire
+        await prisma.$transaction(async (tx) => {
+          // Create a CampaignRenewal tombstone to mark this cycle as processed
+          await tx.campaignRenewal.create({
+            data: {
+              creativeId: campaign.id,
+              cycleNumber: campaign.renewalCount,
+              cycleStartAt: campaign.campaignEndAt!,
+              cycleEndAt,
+              totalPrice: Number(campaign.totalPrice ?? 0),
+            },
+          })
+          await expireCampaignTx(tx, campaign.id, now)
+        })
+        renewalResults.push({ creativeId: campaign.id, status: 'EXPIRED_NO_AUTORENEW', ok: true })
+      }
+    } catch (err) {
+      renewalResults.push({
+        creativeId: campaign.id,
+        status: 'ERROR',
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
   }
 
-  const succeeded = results.filter((r) => r.ok).length
-  const failed = results.filter((r) => !r.ok).length
-
   return NextResponse.json({
-    recognized: results.length,
-    succeeded,
-    failed,
-    results,
+    recognized: recognitionResults.length,
+    renewals: renewalResults.length,
+    recognitionResults,
+    renewalResults,
+  })
+}
+
+async function expireCampaign(creativeId: string, now: Date) {
+  await prisma.$transaction(async (tx) => {
+    await expireCampaignTx(tx, creativeId, now)
+  })
+}
+
+async function expireCampaignTx(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  creativeId: string,
+  now: Date
+) {
+  await tx.adCreative.update({
+    where: { id: creativeId },
+    data: { campaignStatus: 'EXPIRED' },
+  })
+  await tx.adRental.updateMany({
+    where: { creativeId, status: 'ACTIVE' },
+    data: { status: 'EXPIRED', endDate: now },
   })
 }
 
