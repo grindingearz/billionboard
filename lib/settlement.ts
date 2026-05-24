@@ -138,12 +138,13 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
     }
   }
 
-  // Calculate split amounts using integer micro-USDC to avoid float errors
+  // Calculate split amounts using integer micro-USDC to avoid float errors.
+  // Floor-round both legs so treasury + distribution never exceeds amount; dust stays in revenue wallet.
   const feePercentStr = await getSetting('management_fee_percent')
   const feePercent = Math.max(0, Math.min(100, parseFloat(feePercentStr) || 10))
   const amountUsdc = Number(event.amount)
-  const amountMicroUsdc = BigInt(Math.round(amountUsdc * 1_000_000))
-  const treasuryMicroUsdc = BigInt(Math.round((amountUsdc * feePercent) / 100 * 1_000_000))
+  const amountMicroUsdc = BigInt(Math.floor(amountUsdc * 1_000_000))
+  const treasuryMicroUsdc = BigInt(Math.floor((amountUsdc * feePercent) / 100 * 1_000_000))
   const distributionMicroUsdc = amountMicroUsdc - treasuryMicroUsdc
   const treasuryAmount = Number(treasuryMicroUsdc) / 1_000_000
   const distributionAmount = Number(distributionMicroUsdc) / 1_000_000

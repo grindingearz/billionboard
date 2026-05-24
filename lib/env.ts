@@ -58,7 +58,17 @@ export const env = {
     return required('DATABASE_URL')
   },
   get sessionSecret(): string {
-    return withDefault('SESSION_SECRET', 'dev-secret-CHANGE-IN-PROD-billionboard-2024')
+    const val = process.env.SESSION_SECRET?.trim()
+    if (!val) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          'Missing required environment variable: SESSION_SECRET\n' +
+          'Add a long random secret to your Vercel project settings.'
+        )
+      }
+      return 'dev-secret-change-in-production'
+    }
+    return val
   },
   get adminPassword(): string | null {
     return optional('ADMIN_PASSWORD')

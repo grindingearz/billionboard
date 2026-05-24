@@ -20,7 +20,6 @@ async function getStats() {
       epochHistory,
       todayAd,
       todayFee,
-      totalDistributed,
       totalClaimPoolAllocated,
       tilePrice,
       feePercentStr,
@@ -68,10 +67,6 @@ async function getStats() {
         _sum: { amount: true },
       }),
       prisma.revenueEvent.aggregate({
-        where: { type: 'CLAIM_PAYOUT' },
-        _sum: { amount: true },
-      }),
-      prisma.revenueEvent.aggregate({
         where: { type: 'CLAIM_POOL_ALLOCATION' },
         _sum: { amount: true },
       }),
@@ -95,7 +90,7 @@ async function getStats() {
       availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
       activeAdvertisers,
       totalRevenue: Number(revenueAgg._sum.amount ?? 0),
-      totalDistributed: Number(totalDistributed._sum.amount ?? 0),
+      totalDistributed: Number(claimedAgg._sum.amount ?? 0),
       totalClaimPoolAllocated: Number(totalClaimPoolAllocated._sum.amount ?? 0),
       totalClaimable: Number(claimableAgg._sum.amount ?? 0),
       totalClaimed: Number(claimedAgg._sum.amount ?? 0),

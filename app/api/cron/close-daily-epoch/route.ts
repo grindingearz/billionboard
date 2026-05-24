@@ -3,10 +3,18 @@ import { getSession } from '@/lib/auth'
 import { env } from '@/lib/env'
 import { yesterdayUtc, closeEpochForDate } from '@/lib/epoch'
 
-// POST /api/cron/close-daily-epoch
-// Auth: Bearer CRON_SECRET header, OR admin session
+// GET /api/cron/close-daily-epoch — Vercel cron invokes via GET
+export async function GET(req: Request) {
+  return runCloseEpoch(req)
+}
+
+// POST /api/cron/close-daily-epoch — manual trigger from admin UI or cron-secret POST
 // Body (optional): { epochDate: "<ISO date>" } — defaults to yesterday UTC
 export async function POST(req: Request) {
+  return runCloseEpoch(req)
+}
+
+async function runCloseEpoch(req: Request): Promise<Response> {
   const authHeader = req.headers.get('authorization')
   const cronSecret = env.cronSecret
   const isCron = !!(cronSecret && authHeader === `Bearer ${cronSecret}`)

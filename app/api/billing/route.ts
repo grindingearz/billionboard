@@ -5,8 +5,17 @@ import { env } from '@/lib/env'
 import { utcDayStart, getOrCreateEpoch } from '@/lib/epoch'
 import { settleRevenueEvent } from '@/lib/settlement'
 
-// POST /api/billing — trigger daily billing run (admin or cron secret)
+// GET /api/billing — Vercel cron invokes via GET; delegates to runBilling
+export async function GET(req: Request) {
+  return runBilling(req)
+}
+
+// POST /api/billing — manual trigger from admin UI or direct cron-secret POST
 export async function POST(req: Request) {
+  return runBilling(req)
+}
+
+async function runBilling(req: Request): Promise<Response> {
   const session = await getSession()
   const authHeader = req.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET

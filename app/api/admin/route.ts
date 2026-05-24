@@ -216,7 +216,13 @@ export async function GET(req: Request) {
   }
 
   if (view === 'readiness_check') {
-    return NextResponse.json(getPayoutReadiness())
+    const readiness = getPayoutReadiness()
+    const sessionWarnings: string[] = []
+    const sessionSecret = process.env.SESSION_SECRET?.trim()
+    if (!sessionSecret) {
+      sessionWarnings.push('SESSION_SECRET is not set — session JWTs are insecure. Set it in Vercel env vars immediately.')
+    }
+    return NextResponse.json({ ...readiness, sessionWarnings })
   }
 
   if (view === 'current_epoch') {
@@ -1205,6 +1211,9 @@ export async function POST(req: Request) {
   // ── Legacy create_epoch (old totalPool form) — kept for backward compat ────
 
   if (action === 'snapshot_epoch') {
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ error: 'Mock snapshots are disabled in production.' }, { status: 403 })
+    }
     const { epochId, mockHolders } = body
     if (!Array.isArray(mockHolders)) {
       return NextResponse.json({ error: 'mockHolders array required' }, { status: 400 })
