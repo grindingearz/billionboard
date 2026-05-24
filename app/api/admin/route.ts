@@ -1266,6 +1266,34 @@ export async function POST(req: Request) {
     return NextResponse.json(result)
   }
 
+  if (action === 'retry_all_retryable') {
+    const now = new Date()
+    const pending = await prisma.revenueSettlement.findMany({
+      where: {
+        retryable: true,
+        nextRetryAt: { lte: now },
+        settlementStatus: { not: 'SETTLED' },
+      },
+      select: { id: true, revenueEventId: true, retryCount: true, settlementStatus: true },
+      orderBy: { nextRetryAt: 'asc' },
+      take: 50,
+    })
+
+    const results: Array<{ settlementId: string; revenueEventId: string; ok: boolean; status: string; error?: string }> = []
+    for (const record of pending) {
+      try {
+        const result = await settleRevenueEvent(record.revenueEventId)
+        results.push({ settlementId: record.id, revenueEventId: record.revenueEventId, ok: result.ok, status: result.status, error: result.error })
+      } catch (err) {
+        results.push({ settlementId: record.id, revenueEventId: record.revenueEventId, ok: false, status: 'ERROR', error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length
+    const failed = results.filter(r => !r.ok).length
+    return NextResponse.json({ ok: true, retried: results.length, succeeded, failed, results })
+  }
+
   if (action === 'dry_run_settlement') {
     const { revenueEventId } = body
     if (!revenueEventId) return NextResponse.json({ error: 'revenueEventId required' }, { status: 400 })

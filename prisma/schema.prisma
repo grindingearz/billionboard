@@ -212,12 +212,16 @@ model RevenueSettlement {
   settlementStatus         SettlementStatus @default(UNSETTLED)
   settlementError          String?
   retryCount               Int              @default(0)
+  retryable                Boolean          @default(false)
+  lastRetryAt              DateTime?
+  nextRetryAt              DateTime?
   createdAt                DateTime         @default(now())
   settledAt                DateTime?
 
   revenueEvent RevenueEvent @relation(fields: [revenueEventId], references: [id])
 
   @@index([settlementStatus])
+  @@index([retryable, nextRetryAt])
   @@index([createdAt])
 }
 

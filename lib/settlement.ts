@@ -23,6 +23,34 @@ import { Prisma } from '@/app/generated/prisma/client'
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDC_DECIMALS = 6
 
+// Backoff schedule: delay after the Nth failure (0-indexed by current retryCount)
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000] // 1min, 5min, 15min; give up after index ≥ 3
+
+/** Classify whether an error message indicates a transient (retryable) failure. */
+function isRetryable(msg: string): boolean {
+  const lower = msg.toLowerCase()
+  // Non-retryable: key / config errors
+  if (lower.includes('failed to parse private key')) return false
+  if (lower.includes('key mismatch')) return false
+  if (lower.includes('missing wallet config')) return false
+  if (lower.includes('private keys not configured')) return false
+  // Non-retryable: balance / amount errors
+  if (lower.includes('balance insufficient')) return false
+  if (lower.includes('insufficient') && lower.includes('usdc')) return false
+  if (lower.includes('insufficient') && lower.includes('sol')) return false
+  // Non-retryable: address / validity errors
+  if (lower.includes('invalidpublickey') || (lower.includes('invalid') && lower.includes('public key'))) return false
+  if (lower.includes('event type') && lower.includes('not settleable')) return false
+  // Transient: RPC errors, timeouts, network failures, blockhash expired, etc.
+  return true
+}
+
+/** Compute when to next retry based on current retryCount (before this failure's increment). */
+function computeNextRetry(currentRetryCount: number): Date | null {
+  const delayMs = RETRY_DELAYS_MS[currentRetryCount]
+  return delayMs !== undefined ? new Date(Date.now() + delayMs) : null
+}
+
 export type SettlementResult = {
   ok: boolean
   settlementId: string
@@ -144,12 +172,12 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
     const errorMsg = `Private keys not configured (${missing.join(', ')}) — settlement pending manual`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementError: errorMsg, retryCount: { increment: 1 } },
+      data: { settlementError: errorMsg, retryCount: { increment: 1 }, retryable: false, nextRetryAt: null },
     })
     return { ok: false, settlementId: settlement.id, status: settlement.settlementStatus, error: errorMsg }
   }
 
-  // Parse and verify keypairs
+  // Parse and verify keypairs — failures here are always non-retryable config errors
   let sourceKeypair: Keypair
   let revenueKeypair: Keypair
   try {
@@ -159,17 +187,17 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
     const errorMsg = `Failed to parse private key: ${err instanceof Error ? err.message : String(err)}`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementStatus: 'FAILED', settlementError: errorMsg },
+      data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
     })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
 
-  // Critical: verify signer public keys match expected wallets
+  // Critical: verify signer public keys match expected wallets — never retryable
   if (sourceKeypair.publicKey.toBase58() !== sourceWallet) {
     const errorMsg = `CRITICAL: source wallet key mismatch. Key is ${sourceKeypair.publicKey.toBase58()}, expected ${sourceWallet}. Settlement disabled.`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementStatus: 'FAILED', settlementError: errorMsg },
+      data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
     })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
@@ -178,7 +206,7 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
     const errorMsg = `CRITICAL: revenue wallet key mismatch. Key is ${revenueKeypair.publicKey.toBase58()}, expected ${revenueWallet}. Settlement disabled.`
     await prisma.revenueSettlement.update({
       where: { id: settlement.id },
-      data: { settlementStatus: 'FAILED', settlementError: errorMsg },
+      data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryable: false, nextRetryAt: null },
     })
     return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
   }
@@ -234,9 +262,15 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
       })
     } catch (err) {
       const errorMsg = `Move to revenue failed: ${err instanceof Error ? err.message : String(err)}`
+      const retryable = isRetryable(errorMsg)
+      const nextRetryAt = retryable ? computeNextRetry(settlement.retryCount) : null
       await prisma.revenueSettlement.update({
         where: { id: settlement.id },
-        data: { settlementStatus: 'FAILED', settlementError: errorMsg, retryCount: { increment: 1 } },
+        data: {
+          settlementStatus: 'FAILED', settlementError: errorMsg,
+          retryCount: { increment: 1 }, retryable: retryable && nextRetryAt !== null,
+          lastRetryAt: new Date(), nextRetryAt,
+        },
       })
       return { ok: false, settlementId: settlement.id, status: 'FAILED', error: errorMsg }
     }
@@ -278,9 +312,15 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
       })
     } catch (err) {
       const errorMsg = `Treasury transfer failed: ${err instanceof Error ? err.message : String(err)}`
+      const retryable = isRetryable(errorMsg)
+      const nextRetryAt = retryable ? computeNextRetry(settlement.retryCount) : null
       await prisma.revenueSettlement.update({
         where: { id: settlement.id },
-        data: { settlementStatus: 'PARTIAL', settlementError: errorMsg, retryCount: { increment: 1 } },
+        data: {
+          settlementStatus: 'PARTIAL', settlementError: errorMsg,
+          retryCount: { increment: 1 }, retryable: retryable && nextRetryAt !== null,
+          lastRetryAt: new Date(), nextRetryAt,
+        },
       })
       return { ok: false, settlementId: settlement.id, status: 'PARTIAL', error: errorMsg, moveToRevenueTx }
     }
@@ -308,9 +348,15 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
       )
     } catch (err) {
       const errorMsg = `Distribution transfer failed: ${err instanceof Error ? err.message : String(err)}`
+      const retryable = isRetryable(errorMsg)
+      const nextRetryAt = retryable ? computeNextRetry(settlement.retryCount) : null
       await prisma.revenueSettlement.update({
         where: { id: settlement.id },
-        data: { settlementStatus: 'PARTIAL', settlementError: errorMsg, retryCount: { increment: 1 } },
+        data: {
+          settlementStatus: 'PARTIAL', settlementError: errorMsg,
+          retryCount: { increment: 1 }, retryable: retryable && nextRetryAt !== null,
+          lastRetryAt: new Date(), nextRetryAt,
+        },
       })
       return {
         ok: false, settlementId: settlement.id, status: 'PARTIAL', error: errorMsg,
@@ -327,6 +373,8 @@ export async function settleRevenueEvent(revenueEventId: string): Promise<Settle
       settlementStatus: 'SETTLED',
       settlementError: null,
       settledAt: new Date(),
+      retryable: false,
+      nextRetryAt: null,
     },
   })
 

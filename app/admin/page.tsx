@@ -198,6 +198,9 @@ interface SettlementRow {
   settlementStatus: string
   settlementError: string | null
   retryCount: number
+  retryable: boolean
+  lastRetryAt: string | null
+  nextRetryAt: string | null
   createdAt: string
   settledAt: string | null
   revenueEvent: {
@@ -401,6 +404,8 @@ export default function AdminPage() {
   const [accountingSubview, setAccountingSubview] = useState<'cards' | 'events'>('cards')
   const [repairing, setRepairing] = useState(false)
   const [repairMsg, setRepairMsg] = useState('')
+  const [retryAllRunning, setRetryAllRunning] = useState(false)
+  const [retryAllResult, setRetryAllResult] = useState<{ retried: number; succeeded: number; failed: number } | null>(null)
   const [prelaunchConfirm, setPrelaunchConfirm] = useState('')
   const [prelaunchRunning, setPrelaunchRunning] = useState(false)
   const [prelaunchResult, setPrelaunchResult] = useState<{
@@ -2633,13 +2638,42 @@ export default function AdminPage() {
 
           {view === 'settlements' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <p className="text-xs text-white/40">
                   One settlement record per revenue event. Retry sends only missing legs.
                 </p>
-                <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-3 py-1.5 rounded transition-colors">
-                  Refresh
-                </button>
+                <div className="flex items-center gap-2">
+                  {retryAllResult && (
+                    <span className="text-xs text-white/50">
+                      Retried {retryAllResult.retried}: {retryAllResult.succeeded} ok, {retryAllResult.failed} failed
+                    </span>
+                  )}
+                  <button
+                    disabled={retryAllRunning}
+                    onClick={async () => {
+                      setRetryAllRunning(true)
+                      setRetryAllResult(null)
+                      try {
+                        const res = await fetch('/api/admin', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ action: 'retry_all_retryable' }),
+                        })
+                        const d = await res.json()
+                        setRetryAllResult({ retried: d.retried ?? 0, succeeded: d.succeeded ?? 0, failed: d.failed ?? 0 })
+                        load()
+                      } finally {
+                        setRetryAllRunning(false)
+                      }
+                    }}
+                    className="text-xs bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                  >
+                    {retryAllRunning ? 'Retrying…' : 'Retry All Retryable'}
+                  </button>
+                  <button onClick={load} className="text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-3 py-1.5 rounded transition-colors">
+                    Refresh
+                  </button>
+                </div>
               </div>
 
               {/* Settlement totals summary */}
@@ -2772,6 +2806,21 @@ export default function AdminPage() {
                                     {s.settlementError}
                                   </div>
                                 )}
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {s.retryable ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">auto-retry</span>
+                                  ) : s.settlementStatus === 'FAILED' ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-400/60 border border-red-500/20">no-retry</span>
+                                  ) : null}
+                                  {s.retryCount > 0 && (
+                                    <span className="text-[9px] text-white/20">{s.retryCount}× retried</span>
+                                  )}
+                                </div>
+                                {s.retryable && s.nextRetryAt && (
+                                  <div className="text-[9px] text-white/30">
+                                    Next: {new Date(s.nextRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </div>
+                                )}
                                 {canRetry && (
                                   <button
                                     disabled={!!retryingSettlement[s.id]}
@@ -2793,11 +2842,8 @@ export default function AdminPage() {
                                     }}
                                     className="text-[10px] bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-400 px-2 py-0.5 rounded transition-colors disabled:opacity-50 w-fit"
                                   >
-                                    {retryingSettlement[s.id] ? 'Retrying…' : 'Retry'}
+                                    {retryingSettlement[s.id] ? 'Retrying…' : 'Retry Now'}
                                   </button>
-                                )}
-                                {s.retryCount > 0 && (
-                                  <div className="text-[10px] text-white/20">Retried {s.retryCount}×</div>
                                 )}
                               </div>
                             </td>
