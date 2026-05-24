@@ -18,9 +18,17 @@ export async function GET() {
   const now = new Date()
   const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000)
 
-  const [campaigns, clickCounts, click24hCounts] = await Promise.all([
+  // Count all active board tiles for UI fallback signal
+  const allActiveTilesCount = await prisma.adRental.count({ where: { status: 'ACTIVE' } })
+
+  // Include legacy ads (campaignStatus=null) AND campaign ads (campaignStatus='ACTIVE').
+  // Exclude only explicitly expired/rejected creatives.
+  const [rawCampaigns, clickCounts, click24hCounts] = await Promise.all([
     prisma.adCreative.findMany({
-      where: { campaignStatus: 'ACTIVE' },
+      where: {
+        OR: [{ campaignStatus: null }, { campaignStatus: 'ACTIVE' }],
+        adRentals: { some: { status: 'ACTIVE' } },
+      },
       select: {
         id: true,
         campaignName: true,
@@ -29,9 +37,10 @@ export async function GET() {
         durationType: true,
         campaignStartAt: true,
         campaignEndAt: true,
+        createdAt: true,
         adRentals: {
           where: { status: 'ACTIVE' },
-          select: { id: true },
+          select: { id: true, startDate: true, nextBillingAt: true, dailyRate: true },
         },
       },
     }),
@@ -49,18 +58,40 @@ export async function GET() {
   const clickMap = new Map(clickCounts.map((c) => [c.creativeId, c._count.id]))
   const click24hMap = new Map(click24hCounts.map((c) => [c.creativeId, c._count.id]))
 
-  const entries = campaigns.map((c) => {
+  // Debug logging (server-side only)
+  console.log(`[leaderboard] allActiveTiles=${allActiveTilesCount} rawCampaigns=${rawCampaigns.length}`)
+
+  const excluded: { id: string; reason: string }[] = []
+
+  const entries = rawCampaigns.flatMap((c) => {
     const activeTiles = c.adRentals.length
+    if (activeTiles === 0) {
+      excluded.push({ id: c.id, reason: 'zero_tiles' })
+      return []
+    }
+
+    // Resolve startAt with fallback chain
+    const rentalStartDates = c.adRentals.map((r) => r.startDate).filter(Boolean) as Date[]
+    const earliestRentalStart = rentalStartDates.length > 0
+      ? new Date(Math.min(...rentalStartDates.map((d) => d.getTime())))
+      : null
+    const startAt = c.campaignStartAt ?? earliestRentalStart ?? c.createdAt
+
+    // Resolve endAt with fallback chain
+    // For legacy per-day ads, nextBillingAt represents the "paid-until" boundary
+    const rentalNextBillings = c.adRentals.map((r) => r.nextBillingAt).filter(Boolean) as Date[]
+    const latestNextBilling = rentalNextBillings.length > 0
+      ? new Date(Math.max(...rentalNextBillings.map((d) => d.getTime())))
+      : null
+    const endAt = c.campaignEndAt ?? latestNextBilling ?? new Date(startAt.getTime() + 24 * 60 * 60 * 1000)
+
     const boardSharePercent = (activeTiles / 100000) * 100
-    const endAt = c.campaignEndAt ? new Date(c.campaignEndAt) : null
-    const daysRemaining = endAt
-      ? Math.max(0, Math.ceil((endAt.getTime() - now.getTime()) / 86400000))
-      : 0
+    const daysRemaining = Math.max(0, Math.ceil((endAt.getTime() - now.getTime()) / 86400000))
     const billboardPower = activeTiles * Math.max(daysRemaining, 0)
     const totalClicks = clickMap.get(c.id) ?? 0
     const clicks24h = click24hMap.get(c.id) ?? 0
 
-    return {
+    return [{
       creativeId: c.id,
       displayName: getDisplayName(c.campaignName, c.destUrl, c.id),
       destUrl: c.destUrl,
@@ -72,10 +103,12 @@ export async function GET() {
       billboardPower,
       totalClicks,
       clicks24h,
-      campaignStartAt: c.campaignStartAt?.toISOString() ?? null,
-      campaignEndAt: c.campaignEndAt?.toISOString() ?? null,
-    }
+      campaignStartAt: startAt.toISOString(),
+      campaignEndAt: endAt.toISOString(),
+    }]
   })
+
+  console.log(`[leaderboard] eligible=${entries.length} excluded=${JSON.stringify(excluded)}`)
 
   const totalActiveTiles = entries.reduce((s, e) => s + e.activeTiles, 0)
   const totalClicks = entries.reduce((s, e) => s + e.totalClicks, 0)
@@ -88,13 +121,11 @@ export async function GET() {
   const todaysTakeover = top([...entries].sort((a, b) => b.boardSharePercent - a.boardSharePercent))
   const mostClicked = top([...entries].sort((a, b) => b.totalClicks - a.totalClicks))
   const newCampaigns = top(
-    [...entries]
-      .filter((e) => e.campaignStartAt != null)
-      .sort((a, b) => new Date(b.campaignStartAt!).getTime() - new Date(a.campaignStartAt!).getTime())
+    [...entries].sort((a, b) => new Date(b.campaignStartAt).getTime() - new Date(a.campaignStartAt).getTime())
   )
   const expiringSoon = top(
     [...entries]
-      .filter((e) => e.campaignEndAt != null && e.daysRemaining > 0)
+      .filter((e) => e.daysRemaining > 0)
       .sort((a, b) => a.daysRemaining - b.daysRemaining)
   )
 
@@ -102,6 +133,7 @@ export async function GET() {
     stats: {
       totalActiveCampaigns: entries.length,
       totalActiveTiles,
+      totalBoardActiveTiles: allActiveTilesCount,
       totalClicks,
       totalClicks24h,
     },

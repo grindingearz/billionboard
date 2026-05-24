@@ -15,13 +15,14 @@ type LeaderboardEntry = {
   billboardPower: number
   totalClicks: number
   clicks24h: number
-  campaignStartAt: string | null
-  campaignEndAt: string | null
+  campaignStartAt: string
+  campaignEndAt: string
 }
 
 type Stats = {
   totalActiveCampaigns: number
   totalActiveTiles: number
+  totalBoardActiveTiles: number
   totalClicks: number
   totalClicks24h: number
 }
@@ -43,9 +44,7 @@ function metricValue(entry: LeaderboardEntry, tab: TabKey): string {
     case 'billboardPower': return entry.billboardPower.toLocaleString()
     case 'todaysTakeover': return `${entry.boardSharePercent.toFixed(4)}%`
     case 'mostClicked': return `${entry.totalClicks.toLocaleString()} clicks`
-    case 'newCampaigns': return entry.campaignStartAt
-      ? new Date(entry.campaignStartAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      : '—'
+    case 'newCampaigns': return new Date(entry.campaignStartAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     case 'expiringSoon': return entry.daysRemaining === 1
       ? '1 day left'
       : `${entry.daysRemaining} days left`
@@ -232,7 +231,7 @@ export default function LeaderboardPage() {
               {[
                 { label: 'Active Campaigns', value: data.stats.totalActiveCampaigns.toLocaleString() },
                 { label: 'Tiles in Use', value: data.stats.totalActiveTiles.toLocaleString() },
-                { label: 'Board Coverage', value: `${((data.stats.totalActiveTiles / 100000) * 100).toFixed(2)}%` },
+                { label: 'Board Coverage', value: `${((data.stats.totalBoardActiveTiles / 100000) * 100).toFixed(2)}%` },
                 { label: 'Clicks Today', value: data.stats.totalClicks24h.toLocaleString() },
                 { label: 'Total Clicks', value: data.stats.totalClicks.toLocaleString() },
               ].map(({ label, value }) => (
@@ -275,14 +274,29 @@ export default function LeaderboardPage() {
 
         {!loading && !error && entries.length === 0 && (
           <div className="text-center py-20">
-            <div className="text-white/20 text-lg mb-2">No campaigns yet</div>
-            <p className="text-white/15 text-sm mb-6">Be the first to claim your territory on the board.</p>
-            <Link
-              href="/advertise"
-              className="inline-flex items-center gap-2 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2.5 rounded-lg text-sm transition-colors"
-            >
-              Launch a Campaign →
-            </Link>
+            {data && data.stats.totalBoardActiveTiles > 0 ? (
+              <>
+                <div className="flex items-center justify-center gap-2 mb-3">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                  <div className="text-white/50 text-base font-medium">Leaderboard is syncing active campaigns...</div>
+                </div>
+                <p className="text-white/20 text-sm">
+                  {data.stats.totalBoardActiveTiles.toLocaleString()} active tile{data.stats.totalBoardActiveTiles !== 1 ? 's' : ''} detected on the board.
+                  Rankings will appear shortly.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="text-white/20 text-lg mb-2">No campaigns yet</div>
+                <p className="text-white/15 text-sm mb-6">Be the first to claim your territory on the board.</p>
+                <Link
+                  href="/advertise"
+                  className="inline-flex items-center gap-2 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2.5 rounded-lg text-sm transition-colors"
+                >
+                  Launch a Campaign →
+                </Link>
+              </>
+            )}
           </div>
         )}
 
