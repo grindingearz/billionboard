@@ -111,7 +111,13 @@ export async function closeEpochForDate(date: Date) {
     const managementFeeAmount = (grossPool * feePercent) / 100
     const claimPoolAmount = grossPool - managementFeeAmount
 
-    if (managementFeeAmount > 0) {
+    // Idempotency: only create fee events if they don't already exist for this epoch.
+    // Guards against duplicate events when close-daily-epoch retries after a FAILED run.
+    const [existingMgmt, existingPool] = await Promise.all([
+      prisma.revenueEvent.findFirst({ where: { epochId: epoch.id, type: 'MANAGEMENT_FEE' } }),
+      prisma.revenueEvent.findFirst({ where: { epochId: epoch.id, type: 'CLAIM_POOL_ALLOCATION' } }),
+    ])
+    if (!existingMgmt && managementFeeAmount > 0) {
       await createRevenueEvent({
         type: 'MANAGEMENT_FEE',
         source: 'cron',
@@ -120,7 +126,7 @@ export async function closeEpochForDate(date: Date) {
         metadata: { feePercent, grossPool },
       })
     }
-    if (claimPoolAmount > 0) {
+    if (!existingPool && claimPoolAmount > 0) {
       await createRevenueEvent({
         type: 'CLAIM_POOL_ALLOCATION',
         source: 'cron',

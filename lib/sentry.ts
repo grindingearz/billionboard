@@ -16,6 +16,7 @@ export type AppErrorContext = {
   creativeId?: string
   retryCount?: number
   status?: string
+  test?: boolean
   extra?: Record<string, unknown>
 }
 
@@ -94,6 +95,7 @@ export function captureAppError(
     if (context?.epochId) scope.setTag('epoch_id', context.epochId)
     if (context?.creativeId) scope.setTag('creative_id', context.creativeId)
     if (context?.retryCount !== undefined) scope.setTag('retry_count', String(context.retryCount))
+    if (context?.test !== undefined) scope.setTag('test', String(context.test))
 
     if (context?.extra) {
       const safeExtra = scrubObject(context.extra)

@@ -1845,5 +1845,13 @@ export async function POST(req: Request) {
     })
   }
 
+  if (action === 'test_sentry') {
+    captureAppError(new Error('BillionBoard Sentry test event'), {
+      route: 'admin_test',
+      test: true,
+    })
+    return NextResponse.json({ ok: true, message: 'Test event sent to Sentry (no-op if SENTRY_DSN is not set).' })
+  }
+
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
 }

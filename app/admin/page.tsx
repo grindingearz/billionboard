@@ -485,6 +485,10 @@ export default function AdminPage() {
     creatives: number; topups: number; processedTxs: number; usersBalancesZeroed: number
   } | null>(null)
 
+  // Sentry test
+  const [sentryTestRunning, setSentryTestRunning] = useState(false)
+  const [sentryTestResult, setSentryTestResult] = useState<string | null>(null)
+
   // ── Pagination refs (avoid stale closures in load) ─────────────────────────
   const rentalSubviewRef = useRef<'pending' | 'active'>('pending')
   const rentalPageRef = useRef(1); const rentalPageSizeRef = useRef(25)
@@ -3449,13 +3453,39 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ))}
-                  <div className="pt-2">
+                  <div className="pt-2 flex items-center gap-3 flex-wrap">
                     <button
                       onClick={load}
                       className="text-xs text-white/40 hover:text-white border border-white/10 px-3 py-1.5 rounded transition-colors"
                     >
                       Refresh
                     </button>
+                    <button
+                      onClick={async () => {
+                        setSentryTestRunning(true)
+                        setSentryTestResult(null)
+                        try {
+                          const res = await fetch('/api/admin', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'test_sentry' }),
+                          })
+                          const d = await res.json()
+                          setSentryTestResult(res.ok ? (d.message ?? 'Sent ✓') : (d.error ?? 'Error'))
+                        } catch {
+                          setSentryTestResult('Network error')
+                        } finally {
+                          setSentryTestRunning(false)
+                        }
+                      }}
+                      disabled={sentryTestRunning}
+                      className="text-xs text-purple-400/70 hover:text-purple-300 border border-purple-400/20 hover:border-purple-400/40 px-3 py-1.5 rounded transition-colors disabled:opacity-50"
+                    >
+                      {sentryTestRunning ? 'Sending…' : 'Send Test Sentry Event'}
+                    </button>
+                    {sentryTestResult && (
+                      <span className="text-xs text-white/50">{sentryTestResult}</span>
+                    )}
                   </div>
                 </div>
               )}
