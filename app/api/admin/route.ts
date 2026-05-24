@@ -215,6 +215,58 @@ export async function GET(req: Request) {
     return NextResponse.json({ ...paged(epochs, page, pageSize, totalRows) })
   }
 
+  if (view === 'cron_health') {
+    const [lastBilling, lastRecognition, lastRetrySettlement, lastEpoch, lastReconcile, retryableCount, pendingTopups] = await Promise.all([
+      prisma.dailyBillingRun.findFirst({ orderBy: { runDate: 'desc' } }),
+      prisma.campaignRevenueRecognition.findFirst({ orderBy: { createdAt: 'desc' } }),
+      prisma.revenueSettlement.findFirst({
+        where: { lastRetryAt: { not: null } },
+        orderBy: { lastRetryAt: 'desc' },
+        select: { lastRetryAt: true, settlementStatus: true },
+      }),
+      prisma.distributionEpoch.findFirst({
+        where: { publishedAt: { not: null } },
+        orderBy: { publishedAt: 'desc' },
+        select: { publishedAt: true, epochDate: true, status: true },
+      }),
+      prisma.processedTransaction.findFirst({
+        orderBy: { processedAt: 'desc' },
+        select: { processedAt: true },
+      }),
+      prisma.revenueSettlement.count({ where: { retryable: true, settlementStatus: { not: 'SETTLED' } } }),
+      prisma.topup.count({ where: { status: 'PENDING', method: 'usdc_solana' } }),
+    ])
+    return NextResponse.json({
+      billing: {
+        lastRunDate: lastBilling?.runDate ?? null,
+        lastStatus: lastBilling?.status ?? null,
+        lastRevenue: lastBilling ? Number(lastBilling.totalRevenue) : null,
+        lastTiles: lastBilling?.tilesCharged ?? null,
+        schedule: '0 1 * * * (01:00 UTC daily)',
+      },
+      recognition: {
+        lastRunAt: lastRecognition?.createdAt ?? null,
+        schedule: '*/10 * * * * (every 10 min)',
+      },
+      retrySettlements: {
+        lastRetryAt: lastRetrySettlement?.lastRetryAt ?? null,
+        retryableCount,
+        schedule: '*/10 * * * * (every 10 min)',
+      },
+      epochClose: {
+        lastClosedAt: lastEpoch?.publishedAt ?? null,
+        lastEpochDate: lastEpoch?.epochDate ?? null,
+        lastEpochStatus: lastEpoch?.status ?? null,
+        schedule: '30 1 * * * (01:30 UTC daily)',
+      },
+      reconcile: {
+        lastTransactionAt: lastReconcile?.processedAt ?? null,
+        pendingTopups,
+        schedule: '*/5 * * * * (every 5 min)',
+      },
+    })
+  }
+
   if (view === 'readiness_check') {
     const readiness = getPayoutReadiness()
     const sessionWarnings: string[] = []

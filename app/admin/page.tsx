@@ -4,7 +4,30 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-type AdminView = 'overview' | 'rentals' | 'settlements' | 'topups' | 'accounting' | 'distribution' | 'users' | 'settings' | 'reset'
+type AdminView = 'overview' | 'rentals' | 'settlements' | 'topups' | 'accounting' | 'distribution' | 'users' | 'settings' | 'reset' | 'crons'
+
+interface CronHealthEntry {
+  lastRunDate?: string | null
+  lastRunAt?: string | null
+  lastRetryAt?: string | null
+  lastClosedAt?: string | null
+  lastTransactionAt?: string | null
+  lastStatus?: string | null
+  lastEpochDate?: string | null
+  lastEpochStatus?: string | null
+  lastRevenue?: number | null
+  lastTiles?: number | null
+  retryableCount?: number
+  pendingTopups?: number
+  schedule: string
+}
+interface CronHealthData {
+  billing: CronHealthEntry
+  recognition: CronHealthEntry
+  retrySettlements: CronHealthEntry
+  epochClose: CronHealthEntry
+  reconcile: CronHealthEntry
+}
 
 interface KeyDiagnostic {
   present: boolean
@@ -371,6 +394,7 @@ export default function AdminPage() {
   const [billingRunning, setBillingRunning] = useState(false)
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [cronHealth, setCronHealth] = useState<CronHealthData | null>(null)
 
   // Rentals
   const [rentalSubview, setRentalSubview] = useState<'pending' | 'active'>('pending')
@@ -614,6 +638,9 @@ export default function AdminPage() {
         ])
         if (settingsRes.ok) { const d = await settingsRes.json(); setPricingForm({ ...defaultPricing, ...d.settings }) }
         if (accountingRes.ok) { const d = await accountingRes.json(); setAccountingData(d) }
+      } else if (view === 'crons') {
+        const res = await fetch('/api/admin?view=cron_health')
+        if (res.ok) { const d = await res.json(); setCronHealth(d) }
       }
     } finally {
       setLoading(false)
@@ -1236,7 +1263,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-white/10 pb-0 flex-wrap">
-        {(['overview', 'rentals', 'settlements', 'topups', 'accounting', 'distribution', 'users', 'settings', 'reset'] as AdminView[]).map((v) => (
+        {(['overview', 'rentals', 'settlements', 'topups', 'accounting', 'distribution', 'users', 'settings', 'crons', 'reset'] as AdminView[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -1252,6 +1279,7 @@ export default function AdminPage() {
               : v === 'distribution' ? 'Distribution'
               : v === 'users' ? 'Users'
               : v === 'settings' ? 'Settings'
+              : v === 'crons' ? 'Crons'
               : 'Reset'}
           </button>
         ))}
@@ -3329,6 +3357,108 @@ export default function AdminPage() {
                 )}
               </div>
 
+            </div>
+          )}
+
+          {view === 'crons' && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-lg font-bold text-white mb-1">Cron Health</h2>
+                <p className="text-xs text-white/40 mb-5">Last-run timestamps inferred from DB records. All routes require CRON_SECRET.</p>
+              </div>
+              {!cronHealth ? (
+                <div className="text-white/30 text-sm">Loading…</div>
+              ) : (
+                <div className="space-y-3">
+                  {([
+                    {
+                      key: 'reconcile',
+                      label: 'Reconcile USDC Top-ups',
+                      schedule: cronHealth.reconcile.schedule,
+                      lastAt: cronHealth.reconcile.lastTransactionAt,
+                      meta: cronHealth.reconcile.pendingTopups != null
+                        ? `${cronHealth.reconcile.pendingTopups} pending top-up${cronHealth.reconcile.pendingTopups !== 1 ? 's' : ''}`
+                        : null,
+                    },
+                    {
+                      key: 'recognition',
+                      label: 'Recognize Campaign Revenue',
+                      schedule: cronHealth.recognition.schedule,
+                      lastAt: cronHealth.recognition.lastRunAt,
+                      meta: null,
+                    },
+                    {
+                      key: 'billing',
+                      label: 'Legacy Billing (per-tile)',
+                      schedule: cronHealth.billing.schedule,
+                      lastAt: cronHealth.billing.lastRunDate,
+                      meta: cronHealth.billing.lastStatus != null
+                        ? `${cronHealth.billing.lastStatus} · ${cronHealth.billing.lastTiles ?? 0} tiles · $${(cronHealth.billing.lastRevenue ?? 0).toFixed(2)}`
+                        : null,
+                      status: cronHealth.billing.lastStatus,
+                    },
+                    {
+                      key: 'epochClose',
+                      label: 'Close Daily Epoch',
+                      schedule: cronHealth.epochClose.schedule,
+                      lastAt: cronHealth.epochClose.lastClosedAt,
+                      meta: cronHealth.epochClose.lastEpochDate
+                        ? `Epoch ${new Date(cronHealth.epochClose.lastEpochDate).toISOString().slice(0, 10)} · ${cronHealth.epochClose.lastEpochStatus}`
+                        : null,
+                    },
+                    {
+                      key: 'retrySettlements',
+                      label: 'Retry Failed Settlements',
+                      schedule: cronHealth.retrySettlements.schedule,
+                      lastAt: cronHealth.retrySettlements.lastRetryAt,
+                      meta: cronHealth.retrySettlements.retryableCount != null
+                        ? `${cronHealth.retrySettlements.retryableCount} retryable settlement${cronHealth.retrySettlements.retryableCount !== 1 ? 's' : ''} queued`
+                        : null,
+                      alert: (cronHealth.retrySettlements.retryableCount ?? 0) > 0,
+                    },
+                  ] as Array<{ key: string; label: string; schedule: string; lastAt?: string | null; meta: string | null; status?: string | null; alert?: boolean }>).map(({ key, label, schedule, lastAt, meta, status, alert }) => (
+                    <div key={key} className="border border-white/10 rounded-xl p-4 bg-white/2">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-white">{label}</div>
+                          <div className="text-xs text-white/40 font-mono mt-0.5">{schedule}</div>
+                        </div>
+                        {alert && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-400 shrink-0">Action needed</span>
+                        )}
+                        {!alert && status === 'completed' && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-400/10 text-green-400 shrink-0">OK</span>
+                        )}
+                        {!alert && status === 'failed' && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-red-400/10 text-red-400 shrink-0">Failed</span>
+                        )}
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                        <div className="bg-white/3 rounded-lg p-2">
+                          <div className="text-white/40 uppercase tracking-widest mb-1">Last run</div>
+                          <div className="font-mono text-white/70">
+                            {lastAt ? new Date(lastAt).toLocaleString() : '—'}
+                          </div>
+                        </div>
+                        {meta && (
+                          <div className="bg-white/3 rounded-lg p-2">
+                            <div className="text-white/40 uppercase tracking-widest mb-1">Detail</div>
+                            <div className="font-mono text-white/70">{meta}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="pt-2">
+                    <button
+                      onClick={load}
+                      className="text-xs text-white/40 hover:text-white border border-white/10 px-3 py-1.5 rounded transition-colors"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>
