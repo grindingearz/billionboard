@@ -25,6 +25,7 @@ interface AdGroup {
 interface HomeBillboardProps {
   tiles: TileInfoMap
   tilePrice?: number
+  focusCampaign?: string
 }
 
 function getDomain(url: string): string {
@@ -92,7 +93,7 @@ function ActiveAdCard({
   )
 }
 
-export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardProps) {
+export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: HomeBillboardProps) {
   const [zoomIdx, setZoomIdx] = useState(0)
   const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
   const boardContainerRef = useRef<HTMLDivElement>(null)
@@ -164,7 +165,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
     return () => ro.disconnect()
   }, [])
 
-  // Smart initial camera
+  // Smart initial camera — respects focusCampaign param
   useEffect(() => {
     if (initialScrollDone.current) return
     const el = boardContainerRef.current
@@ -176,10 +177,17 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         ? Math.min(containerSize.w, containerSize.h * aspect)
         : containerSize.w || 800
 
-    if (adGroups.length > 0) {
-      const largest = adGroups.reduce((best, g) => g.tileIds.length >= best.tileIds.length ? g : best)
-      const spanCols = Math.max(1, largest.maxCol - largest.minCol + 1)
-      const spanRows = Math.max(1, largest.maxRow - largest.minRow + 1)
+    const targetGroup = focusCampaign
+      ? adGroups.find((g) => g.key === focusCampaign)
+      : null
+
+    const anchor = targetGroup ?? (adGroups.length > 0
+      ? adGroups.reduce((best, g) => g.tileIds.length >= best.tileIds.length ? g : best)
+      : null)
+
+    if (anchor) {
+      const spanCols = Math.max(1, anchor.maxCol - anchor.minCol + 1)
+      const spanRows = Math.max(1, anchor.maxRow - anchor.minRow + 1)
       const zColTarget = (0.20 * BOARD_COLUMNS) / spanCols
       const zRowTarget = (0.20 * BOARD_ROWS) / spanRows
       const zTarget = Math.min(zColTarget, zRowTarget)
@@ -189,8 +197,8 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
         0
       )
       const zoomIdxToUse = Math.max(idealIdx, MIN_ZOOM_IDX)
-      const centerCol = (largest.minCol + largest.maxCol) / 2
-      const centerRow = (largest.minRow + largest.maxRow) / 2
+      const centerCol = (anchor.minCol + anchor.maxCol) / 2
+      const centerRow = (anchor.minRow + anchor.maxRow) / 2
       const newBoardW = newFitW * ZOOM_LEVELS[zoomIdxToUse]
       const newBoardH = (newFitW / aspect) * ZOOM_LEVELS[zoomIdxToUse]
       setZoomIdx(zoomIdxToUse)
@@ -204,7 +212,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
       el.scrollLeft = Math.max(0, (bW - containerSize.w) / 2)
       el.scrollTop = Math.max(0, (bH - containerSize.h) / 2)
     }
-  }, [containerSize.w, containerSize.h, adGroups, aspect])
+  }, [containerSize.w, containerSize.h, adGroups, aspect, focusCampaign])
 
   const zoomIn = useCallback(() => setZoomIdx((i) => Math.min(i + 1, ZOOM_LEVELS.length - 1)), [])
   const zoomOut = useCallback(() => setZoomIdx((i) => Math.max(i - 1, 0)), [])
@@ -316,9 +324,11 @@ export default function HomeBillboard({ tiles, tilePrice = 1 }: HomeBillboardPro
   const handleTileClick = useCallback(
     (tileId: number) => {
       const info = tiles[tileId]
-      if (info?.destUrl) {
-        window.open(info.destUrl, '_blank', 'noopener,noreferrer')
-      }
+      if (!info?.destUrl) return
+      const url = info.creativeId
+        ? `/api/click/${info.creativeId}?t=${tileId}`
+        : info.destUrl
+      window.open(url, '_blank', 'noopener,noreferrer')
     },
     [tiles]
   )

@@ -56,12 +56,18 @@ function formatPrice(price: number): string {
   return `$${price.toFixed(2)}`
 }
 
-export default async function HomePage() {
-  const [stats, tiles, settings] = await Promise.all([
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ focusCampaign?: string }>
+}) {
+  const [stats, tiles, settings, sp] = await Promise.all([
     getStats(),
     getTileData(),
     getAllSettings(),
+    searchParams,
   ])
+  const focusCampaign = sp.focusCampaign
 
   const tilePrice = Math.max(0, parseFloat(settings.tile_price_usd_per_day) || 1)
   const freeEnabled = settings.free_rental_enabled === 'true'
@@ -157,7 +163,7 @@ export default async function HomePage() {
 
         {/* Board viewport — fills remaining screen height */}
         <div className="flex-1 min-h-0">
-          <HomeBillboard tiles={tiles} tilePrice={tilePrice} />
+          <HomeBillboard tiles={tiles} tilePrice={tilePrice} focusCampaign={focusCampaign} />
         </div>
       </div>
 

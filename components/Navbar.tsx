@@ -7,6 +7,7 @@ import WalletButton from './WalletButton'
 const links = [
   { href: '/', label: 'Board' },
   { href: '/advertise', label: 'Advertise' },
+  { href: '/leaderboard', label: 'Leaderboard' },
   { href: '/claim', label: 'Claim' },
   { href: '/stats', label: 'Stats' },
 ]

@@ -86,8 +86,9 @@ model AdCreative {
   userId      String
   imageUrl    String
   destUrl     String
-  altText     String?
-  displayMode DisplayMode @default(REPEAT)
+  altText      String?
+  campaignName String?
+  displayMode  DisplayMode @default(REPEAT)
   // Campaign fields (null = legacy per-day billing)
   durationType            DurationType?
   durationDays            Int?
@@ -109,6 +110,7 @@ model AdCreative {
   adRentals                   AdRental[]
   campaignRevenueRecognitions CampaignRevenueRecognition[]
   campaignRenewals            CampaignRenewal[]
+  clickEvents                 ClickEvent[]
 }
 
 model CampaignRenewal {
@@ -124,6 +126,20 @@ model CampaignRenewal {
 
   @@unique([creativeId, cycleEndAt])
   @@index([creativeId])
+}
+
+model ClickEvent {
+  id         String   @id @default(cuid())
+  creativeId String
+  tileId     Int?
+  referrer   String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  creative AdCreative @relation(fields: [creativeId], references: [id])
+
+  @@index([creativeId])
+  @@index([createdAt])
 }
 
 model CampaignRevenueRecognition {
