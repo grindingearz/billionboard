@@ -10,6 +10,7 @@ import { verifyAndProcessSignature } from '@/lib/usdc-topup'
 import { settleRevenueEvent, dryRunSettlement } from '@/lib/settlement'
 import { fetchWalletUsdcBalances } from '@/lib/wallet-balances'
 import { checkKeyDiagnostic } from '@/lib/wallet-key-check'
+import { getPayoutReadiness } from '@/lib/payout'
 
 async function requireAdmin() {
   const session = await getSession()
@@ -212,6 +213,10 @@ export async function GET(req: Request) {
       prisma.distributionEpoch.count(),
     ])
     return NextResponse.json({ ...paged(epochs, page, pageSize, totalRows) })
+  }
+
+  if (view === 'readiness_check') {
+    return NextResponse.json(getPayoutReadiness())
   }
 
   if (view === 'current_epoch') {
@@ -991,10 +996,10 @@ export async function POST(req: Request) {
     const { epochId } = body
     if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
 
-    const boardMint = process.env.NEXT_PUBLIC_BOARD_MINT ?? ''
+    const boardMint = process.env.BOARD_MINT || process.env.NEXT_PUBLIC_BOARD_MINT || ''
     if (!boardMint) {
       return NextResponse.json(
-        { error: '$BOARD token not launched yet. Set NEXT_PUBLIC_BOARD_MINT to enable snapshots.' },
+        { error: '$BOARD token not launched yet. Set BOARD_MINT to enable snapshots.' },
         { status: 400 }
       )
     }
@@ -1007,38 +1012,96 @@ export async function POST(req: Request) {
     const epoch = await prisma.distributionEpoch.findUnique({ where: { id: epochId } })
     if (!epoch) return NextResponse.json({ error: 'Epoch not found' }, { status: 404 })
 
-    // Fetch excluded wallets to skip system wallets
-    const excluded = await prisma.excludedWallet.findMany({ select: { walletAddress: true } })
-    const excludedSet = new Set(excluded.map((e) => e.walletAddress))
+    // Active excluded wallets — stored in snapshot for audit trail
+    const excludedRows = await prisma.excludedWallet.findMany({
+      where: { active: true },
+      select: { walletAddress: true, reason: true },
+    })
+    const excludedMap = new Map(excludedRows.map((e) => [e.walletAddress, e.reason ?? 'excluded']))
+
+    // Settled distribution for this epoch — use as claim pool if available
+    const settledAgg = await prisma.revenueSettlement.aggregate({
+      where: { revenueEvent: { epochId }, settlementStatus: 'SETTLED' },
+      _sum: { distributionAmount: true },
+    })
+    const settledDistributionAmount = Number(settledAgg._sum.distributionAmount ?? 0)
+    const claimPool = settledDistributionAmount > 0 ? settledDistributionAmount : Number(epoch.claimPoolAmount)
 
     const holders = await fetchTokenHolders(boardMint, heliusApiKey)
-    const eligibleHolders = holders.filter((h) => !excludedSet.has(h.walletAddress))
+    const holderCount = holders.length
+    const eligibleHolders = holders.filter((h) => !excludedMap.has(h.walletAddress))
+    const excludedHolders = holders.filter((h) => excludedMap.has(h.walletAddress))
 
-    const totalSupply = eligibleHolders.reduce((sum, h) => sum + BigInt(h.balance), 0n)
-    const claimPool = Number(epoch.claimPoolAmount)
+    // Eligible supply uses only non-excluded balances
+    const eligibleSupply = eligibleHolders.reduce((sum, h) => sum + BigInt(h.balance), 0n)
+    // Floor-round claim amounts in micro-USDC so dust stays in distribution wallet
+    const poolMicro = BigInt(Math.floor(claimPool * 1_000_000))
 
+    const eligibleWithClaims = eligibleHolders.map((h) => {
+      const balanceBig = BigInt(h.balance)
+      const claimMicro = eligibleSupply > 0n ? (balanceBig * poolMicro) / eligibleSupply : 0n
+      const claimAmount = Number(claimMicro) / 1_000_000
+      return { ...h, claimAmount }
+    })
+
+    const claimCount = eligibleWithClaims.filter((h) => h.claimAmount > 0).length
     const snapshotDate = new Date()
+
     await prisma.$transaction([
       prisma.distributionEpoch.update({
         where: { id: epochId },
         data: {
           status: 'SNAPSHOTTED',
           snapshotDate,
-          eligibleSupply: totalSupply.toString(),
+          eligibleSupply: eligibleSupply.toString(),
+          holderCount,
+          claimCount,
+          ...(settledDistributionAmount > 0 ? { settledDistributionAmount } : {}),
         },
       }),
-      ...eligibleHolders.map((h) =>
+      // Eligible holders — with calculated claim amounts
+      ...eligibleWithClaims.map((h) =>
         prisma.holderSnapshot.upsert({
           where: { epochId_walletAddress: { epochId, walletAddress: h.walletAddress } },
-          update: { tokenBalance: h.balance },
+          update: { tokenBalance: h.balance, eligibleBalance: h.balance, claimAmount: h.claimAmount, excluded: false },
           create: {
             epochId,
             walletAddress: h.walletAddress,
             tokenBalance: h.balance,
-            claimAmount:
-              totalSupply > 0n
-                ? (Number(BigInt(h.balance) * BigInt(Math.round(claimPool * 1e6))) / Number(totalSupply)) / 1e6
-                : 0,
+            eligibleBalance: h.balance,
+            claimAmount: h.claimAmount,
+            excluded: false,
+            status: 'CLAIMABLE',
+          },
+        })
+      ),
+      // Excluded holders — stored for audit trail with zero claim
+      ...excludedHolders.map((h) =>
+        prisma.holderSnapshot.upsert({
+          where: { epochId_walletAddress: { epochId, walletAddress: h.walletAddress } },
+          update: { tokenBalance: h.balance, eligibleBalance: 0, claimAmount: 0, excluded: true, exclusionReason: excludedMap.get(h.walletAddress) },
+          create: {
+            epochId,
+            walletAddress: h.walletAddress,
+            tokenBalance: h.balance,
+            eligibleBalance: 0,
+            claimAmount: 0,
+            excluded: true,
+            exclusionReason: excludedMap.get(h.walletAddress),
+            status: 'VOID',
+          },
+        })
+      ),
+      // Pre-create CLAIMABLE Claims for eligible holders (idempotent — never overwrites existing)
+      ...eligibleWithClaims.map((h) =>
+        prisma.claim.upsert({
+          where: { epochId_walletAddress: { epochId, walletAddress: h.walletAddress } },
+          update: {},
+          create: {
+            epochId,
+            walletAddress: h.walletAddress,
+            amount: h.claimAmount,
+            status: 'CLAIMABLE',
           },
         })
       ),
@@ -1046,8 +1109,13 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      holdersSnapshotted: eligibleHolders.length,
-      eligibleSupply: totalSupply.toString(),
+      holdersSnapshotted: holderCount,
+      eligibleHolders: eligibleHolders.length,
+      excludedHolders: excludedHolders.length,
+      claimCount,
+      eligibleSupply: eligibleSupply.toString(),
+      claimPool,
+      settledDistributionAmount,
     })
   }
 
@@ -1069,6 +1137,51 @@ export async function POST(req: Request) {
       data: { status: 'CLOSED', closedAt: new Date() },
     })
     return NextResponse.json({ ok: true, epoch })
+  }
+
+  if (action === 'claims_export') {
+    const { epochId } = body
+    if (!epochId) return NextResponse.json({ error: 'epochId required' }, { status: 400 })
+
+    const epoch = await prisma.distributionEpoch.findUnique({ where: { id: epochId } })
+    if (!epoch) return NextResponse.json({ error: 'Epoch not found' }, { status: 404 })
+
+    const [snapshots, claims] = await Promise.all([
+      prisma.holderSnapshot.findMany({
+        where: { epochId },
+        orderBy: [{ excluded: 'asc' }, { claimAmount: 'desc' }],
+      }),
+      prisma.claim.findMany({
+        where: { epochId },
+        select: { walletAddress: true, status: true, txHash: true },
+      }),
+    ])
+
+    const claimMap = new Map(claims.map((c) => [c.walletAddress, c]))
+    const dateStr = epoch.epochDate.toISOString().slice(0, 10)
+
+    const csvRows = [
+      ['wallet', 'tokenBalance', 'eligibleBalance', 'claimAmount', 'excluded', 'status', 'txSignature'].join(','),
+      ...snapshots.map((s) => {
+        const claim = claimMap.get(s.walletAddress)
+        return [
+          s.walletAddress,
+          s.tokenBalance.toString(),
+          (s.eligibleBalance ?? '0').toString(),
+          s.claimAmount.toString(),
+          s.excluded ? 'true' : 'false',
+          claim?.status ?? 'NO_CLAIM',
+          claim?.txHash ?? '',
+        ].join(',')
+      }),
+    ].join('\n')
+
+    return new Response(csvRows, {
+      headers: {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': `attachment; filename="epoch-${dateStr}-claims.csv"`,
+      },
+    })
   }
 
   if (action === 'add_excluded_wallet') {

@@ -25,6 +25,8 @@ async function getStats() {
       tilePrice,
       feePercentStr,
       currentEpoch,
+      claimableAgg,
+      claimedAgg,
     ] = await Promise.all([
       prisma.adRental.count({ where: { status: 'ACTIVE' } }),
       prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
@@ -76,6 +78,8 @@ async function getStats() {
       getTilePrice(),
       getSetting('management_fee_percent'),
       getOrCreateEpoch(today),
+      prisma.claim.aggregate({ where: { status: 'CLAIMABLE' }, _sum: { amount: true } }),
+      prisma.claim.aggregate({ where: { status: 'CLAIMED' }, _sum: { amount: true } }),
     ])
 
     const todayAdRevenue = Number(todayAd._sum.amount ?? 0)
@@ -93,6 +97,8 @@ async function getStats() {
       totalRevenue: Number(revenueAgg._sum.amount ?? 0),
       totalDistributed: Number(totalDistributed._sum.amount ?? 0),
       totalClaimPoolAllocated: Number(totalClaimPoolAllocated._sum.amount ?? 0),
+      totalClaimable: Number(claimableAgg._sum.amount ?? 0),
+      totalClaimed: Number(claimedAgg._sum.amount ?? 0),
       tilePrice,
       feePercent,
       msUntilClose: msUntilUtcClose(),
@@ -116,6 +122,8 @@ async function getStats() {
       totalRevenue: 0,
       totalDistributed: 0,
       totalClaimPoolAllocated: 0,
+      totalClaimable: 0,
+      totalClaimed: 0,
       tilePrice: 1,
       feePercent: 10,
       msUntilClose: 0,
@@ -178,7 +186,7 @@ export default async function StatsPage() {
       <h1 className="text-3xl font-black text-white mb-1">Stats</h1>
       <p className="text-white/40 text-sm mb-10">Live revenue and distribution pool data</p>
 
-      {/* KPI grid — 7 items */}
+      {/* KPI grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
         {[
           { label: 'Active tiles', value: s.activeTiles.toLocaleString(), color: 'text-green-400' },
@@ -187,7 +195,8 @@ export default async function StatsPage() {
           { label: 'Trading fee today', value: `$${fmt(s.today.feeRevenue)}`, color: 'text-blue-400' },
           { label: "Today's claim pool", value: `$${fmt(s.today.claimPool)}`, color: 'text-green-400' },
           { label: 'Total claim pool allocated', value: `$${fmt(s.totalClaimPoolAllocated)}`, color: 'text-white' },
-          { label: 'Total distributed', value: `$${fmt(s.totalDistributed)}`, color: 'text-white/70' },
+          { label: 'Claimable by holders', value: `$${fmt(s.totalClaimable)}`, color: 'text-amber-400' },
+          { label: 'Total claimed (USDC)', value: `$${fmt(s.totalClaimed)}`, color: 'text-white/70' },
         ].map(({ label, value, color }) => (
           <div key={label} className="border border-white/10 rounded-xl p-4 bg-white/2">
             <div className={`text-2xl font-black ${color}`}>{value}</div>
@@ -415,6 +424,26 @@ export default async function StatsPage() {
       {s.billingRuns.length === 0 && s.epochHistory.length === 0 && (
         <div className="text-center text-white/30 py-12">
           No billing data yet. Revenue starts flowing once ads go live.
+        </div>
+      )}
+
+      {/* Claim CTA */}
+      {s.totalClaimable > 0 && (
+        <div className="mb-8 border border-green-400/15 bg-green-400/5 rounded-xl p-5 flex items-center justify-between gap-4">
+          <div>
+            <div className="text-white font-bold text-sm">
+              ${fmt(s.totalClaimable)} USDC available to claim
+            </div>
+            <div className="text-white/40 text-xs mt-0.5">
+              $BOARD holders can claim their pro-rata share of daily revenue.
+            </div>
+          </div>
+          <a
+            href="/claim"
+            className="shrink-0 bg-green-400 hover:bg-green-300 text-black font-bold px-4 py-2 rounded-lg text-sm transition-colors"
+          >
+            Claim →
+          </a>
         </div>
       )}
 

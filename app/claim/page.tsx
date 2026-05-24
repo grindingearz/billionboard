@@ -1,16 +1,21 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 
-interface Snapshot {
+interface ClaimableItem {
   epochId: string
-  claimAmount: string
-  epoch: { epochDate: string; status: string }
+  amount: string
+  claimAmount?: string  // legacy field
+  tokenBalance: number | null
+  sharePercent: number | null
+  distributionFunded: boolean
+  epoch: { epochDate: string; status: string; id: string }
+  isLegacy?: boolean
 }
 
-interface Claim {
+interface HistoryClaim {
   epochId: string
   amount: string
   status: string
@@ -22,13 +27,22 @@ interface Claim {
 interface ClaimData {
   wallet: string
   excluded: boolean
-  claimable: Snapshot[]
-  claims: Claim[]
+  claimable: ClaimableItem[]
+  claims: HistoryClaim[]
   payoutActive: boolean
   tokenBalance: null
 }
 
 const BOARD_MINT = process.env.NEXT_PUBLIC_BOARD_MINT ?? ''
+
+function epochDateLabel(iso: string) {
+  const d = new Date(iso)
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')} UTC`
+}
+
+function getAmount(item: ClaimableItem): number {
+  return Number(item.amount ?? item.claimAmount ?? 0)
+}
 
 export default function ClaimPage() {
   const { publicKey } = useWallet()
@@ -37,9 +51,22 @@ export default function ClaimPage() {
   const [loading, setLoading] = useState(false)
   const [claiming, setClaiming] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const sessionCreatedFor = useRef<string | null>(null)
 
   const walletAddr = publicKey?.toBase58() ?? ''
 
+  // Create an ADVERTISER session when the wallet connects (required for POST /api/claims)
+  useEffect(() => {
+    if (!walletAddr || sessionCreatedFor.current === walletAddr) return
+    sessionCreatedFor.current = walletAddr
+    fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ walletAddress: walletAddr }),
+    }).catch(() => {/* session creation is best-effort */})
+  }, [walletAddr])
+
+  // Fetch claim data when wallet changes
   useEffect(() => {
     if (!walletAddr) { setData(null); return }
     setLoading(true)
@@ -51,25 +78,51 @@ export default function ClaimPage() {
       .finally(() => setLoading(false))
   }, [walletAddr])
 
+  const refreshData = () => {
+    if (!walletAddr) return
+    fetch(`/api/claims?wallet=${encodeURIComponent(walletAddr)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(setData)
+      .catch(() => {})
+  }
+
   const claim = async (epochId: string) => {
     setClaiming(epochId)
     setError('')
     const res = await fetch('/api/claims', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ wallet: walletAddr, epochId }),
+      body: JSON.stringify({ epochId }),
     })
     const d = await res.json()
-    if (res.ok) {
-      const r2 = await fetch(`/api/claims?wallet=${encodeURIComponent(walletAddr)}`)
-      if (r2.ok) setData(await r2.json())
+    if (res.ok || res.status === 202) {
+      refreshData()
     } else {
       setError(d.error ?? 'Claim failed')
     }
     setClaiming(null)
   }
 
-  const totalClaimable = data?.claimable.reduce((s, c) => s + Number(c.claimAmount), 0) ?? 0
+  const claimAll = async () => {
+    if (!data?.claimable.length) return
+    for (const item of data.claimable) {
+      setClaiming(item.epochId)
+      const res = await fetch('/api/claims', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ epochId: item.epochId }),
+      })
+      if (!res.ok && res.status !== 202) {
+        const d = await res.json()
+        setError(d.error ?? 'Claim failed')
+        break
+      }
+    }
+    setClaiming(null)
+    refreshData()
+  }
+
+  const totalClaimable = data?.claimable.reduce((s, c) => s + getAmount(c), 0) ?? 0
   const payoutActive = data?.payoutActive ?? false
 
   return (
@@ -90,7 +143,7 @@ export default function ClaimPage() {
         </div>
       )}
 
-      {/* Payout pending banner (token exists but private key not configured) */}
+      {/* Payout pending banner */}
       {BOARD_MINT && !payoutActive && data && (
         <div className="border border-white/10 bg-white/3 rounded-xl p-4 mb-8">
           <div className="text-xs text-white/40 uppercase tracking-widest mb-1">Payouts pending</div>
@@ -140,10 +193,25 @@ export default function ClaimPage() {
           <div className="grid grid-cols-2 gap-4 mb-6">
             <div className="border border-white/10 rounded-xl p-4 bg-white/2">
               <div className="text-xs text-white/40 uppercase tracking-widest mb-1">$BOARD Balance</div>
-              <div className="text-2xl font-black text-white/30">—</div>
-              <div className="text-xs text-white/25 mt-1">
-                {BOARD_MINT ? 'Loading…' : 'Token launch pending'}
-              </div>
+              {data.claimable[0]?.tokenBalance != null ? (
+                <>
+                  <div className="text-2xl font-black text-white">
+                    {data.claimable[0].tokenBalance.toLocaleString()}
+                  </div>
+                  {data.claimable[0].sharePercent != null && (
+                    <div className="text-xs text-white/30 mt-1">
+                      {data.claimable[0].sharePercent.toFixed(4)}% of eligible supply
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="text-2xl font-black text-white/30">—</div>
+                  <div className="text-xs text-white/25 mt-1">
+                    {BOARD_MINT ? 'No snapshot yet' : 'Token launch pending'}
+                  </div>
+                </>
+              )}
             </div>
             <div className="border border-green-400/20 bg-green-400/5 rounded-xl p-4">
               <div className="text-xs text-green-400/70 uppercase tracking-widest mb-1">Claimable USDC</div>
@@ -157,7 +225,18 @@ export default function ClaimPage() {
           {/* Claimable epochs */}
           {data.claimable.length > 0 && (
             <div className="mb-6">
-              <h3 className="text-sm font-bold text-white mb-3">Ready to claim</h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-white">Ready to claim</h3>
+                {data.claimable.length > 1 && (
+                  <button
+                    onClick={claimAll}
+                    disabled={!!claiming}
+                    className="text-xs bg-green-400/10 border border-green-400/20 text-green-400 hover:bg-green-400/20 px-3 py-1 rounded transition-colors disabled:opacity-50"
+                  >
+                    Claim all
+                  </button>
+                )}
+              </div>
               <div className="space-y-2">
                 {data.claimable.map((s) => (
                   <div
@@ -166,18 +245,22 @@ export default function ClaimPage() {
                   >
                     <div>
                       <div className="text-sm text-white font-medium">
-                        {(() => { const d = new Date(s.epoch.epochDate); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC` })()}
+                        {epochDateLabel(s.epoch.epochDate)}
                       </div>
-                      <div className="text-xs text-white/40">Epoch distribution</div>
+                      <div className="text-xs text-white/40">
+                        {s.tokenBalance != null
+                          ? `${s.tokenBalance.toLocaleString()} tokens${s.sharePercent != null ? ` · ${s.sharePercent.toFixed(4)}%` : ''}`
+                          : 'Epoch distribution'}
+                      </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-green-400 font-mono font-bold">
-                        ${Number(s.claimAmount).toFixed(4)}
+                        ${getAmount(s).toFixed(4)}
                       </span>
                       {payoutActive ? (
                         <button
                           onClick={() => claim(s.epochId)}
-                          disabled={claiming === s.epochId}
+                          disabled={!!claiming}
                           className="bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black font-bold px-3 py-1.5 rounded text-xs transition-colors"
                         >
                           {claiming === s.epochId ? '…' : 'Claim'}
@@ -185,7 +268,7 @@ export default function ClaimPage() {
                       ) : (
                         <button
                           onClick={() => claim(s.epochId)}
-                          disabled={claiming === s.epochId}
+                          disabled={!!claiming}
                           className="bg-white/10 hover:bg-white/15 disabled:opacity-50 text-white/60 font-bold px-3 py-1.5 rounded text-xs transition-colors"
                           title="Payout not active yet — registers your claim for when it activates"
                         >
@@ -209,9 +292,7 @@ export default function ClaimPage() {
                     key={`${c.epochId}-${c.status}`}
                     className="flex items-center justify-between px-4 py-2.5 bg-white/3 rounded-lg border border-white/5"
                   >
-                    <div className="text-sm text-white/60">
-                      {(() => { const d = new Date(c.epoch.epochDate); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} UTC` })()}
-                    </div>
+                    <div className="text-sm text-white/60">{epochDateLabel(c.epoch.epochDate)}</div>
                     <div className="flex items-center gap-3">
                       <span className="font-mono text-white">${Number(c.amount).toFixed(4)}</span>
                       <span
@@ -259,6 +340,7 @@ export default function ClaimPage() {
           <li>• Your share = your tokens ÷ total eligible supply × daily pool</li>
           <li>• Claims are distributed in USDC on Solana</li>
           <li>• System wallets are excluded from distributions</li>
+          <li>• Selling tokens after the snapshot does not affect your claim</li>
         </ul>
       </div>
     </div>

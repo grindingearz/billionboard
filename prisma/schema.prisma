@@ -331,6 +331,10 @@ model DistributionEpoch {
   // Snapshot
   eligibleSupply      Decimal     @default(0) @db.Decimal(18, 9)
   snapshotDate        DateTime?
+  // Settled distribution funds available for claims
+  settledDistributionAmount Decimal?    @db.Decimal(18, 6)
+  holderCount               Int?
+  claimCount                Int?
   // Status
   status              EpochStatus @default(DRAFT)
   publishedAt         DateTime?
@@ -360,19 +364,24 @@ enum EpochStatus {
   SNAPSHOTTED
   PUBLISHED
   CLOSED
+  CLAIMING_OPEN
+  COMPLETED
 }
 
 model HolderSnapshot {
-  id            String         @id @default(cuid())
-  epochId       String
-  walletAddress String
-  tokenBalance  Decimal        @db.Decimal(18, 9)
-  claimAmount   Decimal        @db.Decimal(18, 6)
-  claimedAmount Decimal        @default(0) @db.Decimal(18, 6)
-  status        SnapshotStatus @default(CLAIMABLE)
-  txSignature   String?
-  claimedAt     DateTime?
-  createdAt     DateTime       @default(now())
+  id              String         @id @default(cuid())
+  epochId         String
+  walletAddress   String
+  tokenBalance    Decimal        @db.Decimal(18, 9)
+  eligibleBalance Decimal?       @db.Decimal(18, 9)
+  claimAmount     Decimal        @db.Decimal(18, 6)
+  claimedAmount   Decimal        @default(0) @db.Decimal(18, 6)
+  excluded        Boolean        @default(false)
+  exclusionReason String?
+  status          SnapshotStatus @default(CLAIMABLE)
+  txSignature     String?
+  claimedAt       DateTime?
+  createdAt       DateTime       @default(now())
 
   epoch DistributionEpoch @relation(fields: [epochId], references: [id])
 
@@ -394,7 +403,8 @@ model Claim {
   walletAddress String
   amount        Decimal     @db.Decimal(18, 6)
   txHash        String?
-  status        ClaimStatus @default(PENDING)
+  status        ClaimStatus @default(CLAIMABLE)
+  error         String?
   claimedAt     DateTime?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
@@ -403,9 +413,11 @@ model Claim {
 
   @@unique([epochId, walletAddress])
   @@index([walletAddress])
+  @@index([status])
 }
 
 enum ClaimStatus {
+  CLAIMABLE
   PENDING
   CLAIMED
   FAILED
@@ -416,6 +428,7 @@ model ExcludedWallet {
   walletAddress String   @unique
   label         String?
   reason        String?
+  active        Boolean  @default(true)
   createdAt     DateTime @default(now())
 }
 
