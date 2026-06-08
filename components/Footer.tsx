@@ -1,5 +1,4 @@
 import Link from 'next/link'
-import Image from 'next/image'
 
 export default function Footer() {
   return (
@@ -23,8 +22,9 @@ export default function Footer() {
             rel="noopener"
             className="inline-flex w-fit rounded transition-opacity hover:opacity-85"
           >
-            <Image
-              src="https://orynth.dev/api/badge/billionboard?theme=dark&style=default"
+            {/* Orynth serves this badge from an API endpoint; keep it unoptimized so it renders reliably. */}
+            <img
+              src="https://www.orynth.dev/api/badge/billionboard?theme=dark&style=default"
               alt="Featured on Orynth"
               width="260"
               height="80"
