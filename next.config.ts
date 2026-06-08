@@ -3,6 +3,15 @@ import { withSentryConfig } from "@sentry/nextjs";
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['sharp'],
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'orynth.dev',
+        pathname: '/api/badge/billionboard',
+      },
+    ],
+  },
 };
 
 export default withSentryConfig(nextConfig, {
