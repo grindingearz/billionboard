@@ -1,9 +1,15 @@
 interface Props {
   feePercent?: number
+  tradingFeeDistEnabled?: boolean
+  tradingFeeModeCopy?: string
 }
 
-export default function FeeFlowExplainer({ feePercent = 10 }: Props) {
+export default function FeeFlowExplainer({ feePercent = 10, tradingFeeDistEnabled = false, tradingFeeModeCopy }: Props) {
   const distPercent = 100 - feePercent
+
+  const revenuePoolDesc = tradingFeeDistEnabled
+    ? 'Advertising fees and verified on-chain trading fees accumulate in the daily revenue pool.'
+    : 'Advertising fees accumulate in the daily revenue pool. Trading fees are currently routed separately to Treasury (launch mode).'
 
   const steps = [
     {
@@ -20,19 +26,19 @@ export default function FeeFlowExplainer({ feePercent = 10 }: Props) {
     },
     {
       label: 'Revenue Pool',
-      desc: 'Advertising fees + verified on-chain trading fees accumulate in the daily revenue pool.',
+      desc: revenuePoolDesc,
       color: 'border-green-400/30 text-green-400',
       accent: 'text-green-400',
     },
     {
       label: `Treasury (${feePercent}%)`,
-      desc: `${feePercent}% of gross daily revenue is routed to the treasury wallet to fund platform operations and development.`,
+      desc: `${feePercent}% of gross daily advertising revenue is routed to the treasury wallet to fund platform operations and development.`,
       color: 'border-amber-400/30 text-amber-400',
       accent: 'text-amber-400',
     },
     {
       label: `Claim Pool (${distPercent}%)`,
-      desc: `${distPercent}% of gross daily revenue flows into the claim pool, distributed proportionally to $BOARD holders via daily snapshots.`,
+      desc: `${distPercent}% of gross daily advertising revenue flows into the claim pool, distributed proportionally to $BOARD holders via daily snapshots.`,
       color: 'border-green-400/30 text-green-400',
       accent: 'text-green-400',
     },
@@ -70,6 +76,12 @@ export default function FeeFlowExplainer({ feePercent = 10 }: Props) {
           </div>
         ))}
       </div>
+
+      {!tradingFeeDistEnabled && tradingFeeModeCopy && (
+        <div className="mt-4 text-xs text-amber-400/70 bg-amber-400/5 border border-amber-400/10 rounded-lg px-3 py-2">
+          {tradingFeeModeCopy}
+        </div>
+      )}
 
       <div className="mt-5 pt-4 border-t border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
         <div className="bg-white/3 rounded-lg p-3">
