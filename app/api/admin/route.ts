@@ -1141,12 +1141,12 @@ export async function POST(req: Request) {
       ...excludedHolders.map((h) =>
         prisma.holderSnapshot.upsert({
           where: { epochId_walletAddress: { epochId, walletAddress: h.walletAddress } },
-          update: { tokenBalance: h.balance, eligibleBalance: 0, claimAmount: 0, excluded: true, exclusionReason: excludedMap.get(h.walletAddress) },
+          update: { tokenBalance: h.balance, eligibleBalance: '0', claimAmount: 0, excluded: true, exclusionReason: excludedMap.get(h.walletAddress) },
           create: {
             epochId,
             walletAddress: h.walletAddress,
             tokenBalance: h.balance,
-            eligibleBalance: 0,
+            eligibleBalance: '0',
             claimAmount: 0,
             excluded: true,
             exclusionReason: excludedMap.get(h.walletAddress),
@@ -1296,7 +1296,7 @@ export async function POST(req: Request) {
           create: {
             epochId,
             walletAddress: h.wallet,
-            tokenBalance: h.balance,
+            tokenBalance: String(h.balance),
             claimAmount: totalTokens > 0 ? (h.balance / totalTokens) * pool : 0,
           },
         })
