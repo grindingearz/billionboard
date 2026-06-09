@@ -101,6 +101,7 @@ model AdCreative {
   lastRecognizedAt        DateTime?
   nextRecognitionAt       DateTime?
   campaignStatus          String?       // 'ACTIVE' | 'COMPLETED' | 'EXPIRED'
+  campaignType            String        @default("PAID")  // 'PAID' | 'ADMIN_FREE'
   autoRenew               Boolean       @default(true)
   renewalCount            Int           @default(0)
   createdAt   DateTime    @default(now())
@@ -138,7 +139,20 @@ model ClickEvent {
 
   creative AdCreative @relation(fields: [creativeId], references: [id])
 
-  @@index([creativeId])
+  @@index([creativeId, createdAt])
+  @@index([createdAt])
+}
+
+model TrafficEvent {
+  id        String   @id @default(cuid())
+  type      String
+  path      String
+  sessionId String?
+  referrer  String?
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+  @@index([path, createdAt])
   @@index([createdAt])
 }
 
@@ -329,7 +343,7 @@ model DistributionEpoch {
   // Legacy field — kept for backward compat, mirrors claimPoolAmount
   totalPool           Decimal     @default(0) @db.Decimal(18, 6)
   // Snapshot
-  eligibleSupply      Decimal     @default(0) @db.Decimal(18, 9)
+  eligibleSupply      String      @default("0")
   snapshotDate        DateTime?
   // Settled distribution funds available for claims
   settledDistributionAmount Decimal?    @db.Decimal(18, 6)
@@ -372,8 +386,8 @@ model HolderSnapshot {
   id              String         @id @default(cuid())
   epochId         String
   walletAddress   String
-  tokenBalance    Decimal        @db.Decimal(18, 9)
-  eligibleBalance Decimal?       @db.Decimal(18, 9)
+  tokenBalance    String
+  eligibleBalance String?
   claimAmount     Decimal        @db.Decimal(18, 6)
   claimedAmount   Decimal        @default(0) @db.Decimal(18, 6)
   excluded        Boolean        @default(false)
@@ -428,6 +442,7 @@ model ExcludedWallet {
   walletAddress String   @unique
   label         String?
   reason        String?
+  source        String?  // 'SYSTEM' | 'LP_POOL' | 'STREAMFLOW_LOCK' | 'MANUAL' | 'BURN'
   active        Boolean  @default(true)
   createdAt     DateTime @default(now())
 }

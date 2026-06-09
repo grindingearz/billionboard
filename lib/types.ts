@@ -44,6 +44,7 @@ export interface TileInfo {
   altText?: string
   advertiserEmail?: string
   displayMode?: DisplayMode
+  campaignType?: 'PAID' | 'ADMIN_FREE'
 }
 
 export interface TileInfoMap {
