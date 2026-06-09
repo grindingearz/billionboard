@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { trackEvent } from '@/lib/analytics'
 
 type LeaderboardEntry = {
   creativeId: string
@@ -99,7 +100,7 @@ function FullCard({
           </div>
         </div>
 
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div className="text-green-400 font-bold text-sm">{metricValue(entry, tab)}</div>
           {entry.durationType && (
             <span className="text-[10px] border border-white/10 text-white/30 rounded px-1.5 py-0.5 uppercase tracking-wide">
@@ -151,7 +152,7 @@ function CompactRow({
   tab: TabKey
 }) {
   return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-white/5 last:border-0 group">
+    <div className="flex flex-wrap items-center gap-3 py-2.5 border-b border-white/5 last:border-0 group sm:flex-nowrap">
       <RankBadge rank={rank} />
       {entry.imageUrl && (
         // eslint-disable-next-line @next/next/no-img-element
@@ -165,11 +166,11 @@ function CompactRow({
         <div className="text-white/80 text-sm font-medium truncate">{entry.displayName}</div>
         <div className="text-white/25 text-[11px]">{entry.activeTiles.toLocaleString()} tiles</div>
       </div>
-      <div className="text-green-400 text-sm font-bold tabular-nums shrink-0">{metricValue(entry, tab)}</div>
-      <div className="flex gap-1.5 shrink-0">
+      <div className="text-green-400 text-sm font-bold tabular-nums shrink-0 ml-auto sm:ml-0">{metricValue(entry, tab)}</div>
+      <div className="flex gap-1.5 shrink-0 basis-full justify-end sm:basis-auto">
         <Link
           href={`/?focusCampaign=${entry.creativeId}`}
-          className="text-[10px] border border-white/10 text-white/30 hover:text-white/60 rounded px-2 py-1 transition-colors"
+          className="min-h-8 inline-flex items-center text-[10px] border border-white/10 text-white/30 hover:text-white/60 rounded px-2 py-1 transition-colors"
         >
           Map
         </Link>
@@ -177,7 +178,7 @@ function CompactRow({
           href={`/api/click/${entry.creativeId}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-[10px] border border-green-400/20 text-green-400/60 hover:text-green-400 rounded px-2 py-1 transition-colors"
+          className="min-h-8 inline-flex items-center text-[10px] border border-green-400/20 text-green-400/60 hover:text-green-400 rounded px-2 py-1 transition-colors"
         >
           Visit
         </a>
@@ -195,6 +196,8 @@ export default function LeaderboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  useEffect(() => { trackEvent('PAGE_VIEW', '/leaderboard') }, [])
+
   useEffect(() => {
     setLoading(true)
     fetch('/api/leaderboard')
@@ -208,13 +211,13 @@ export default function LeaderboardPage() {
   const rest = entries.slice(10)
 
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="min-h-dvh bg-black text-white">
       {/* Header */}
-      <div className="border-b border-white/10 bg-black/80 backdrop-blur sticky top-14 z-30">
-        <div className="max-w-6xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between gap-4 mb-4">
+      <div className="border-b border-white/10 bg-black/80 backdrop-blur sticky z-30" style={{ top: 'var(--nav-height)' }}>
+        <div className="max-w-6xl mx-auto px-3 py-4 sm:px-4">
+          <div className="flex items-start justify-between gap-4 mb-4">
             <div>
-              <h1 className="text-2xl font-black tracking-tight">
+              <h1 className="text-xl sm:text-2xl font-black tracking-tight">
                 LEADERBOARD
               </h1>
               <p className="text-white/40 text-sm">Live advertiser rankings across the billion-pixel board</p>
@@ -227,7 +230,7 @@ export default function LeaderboardPage() {
 
           {/* Stats bar */}
           {data && (
-            <div className="flex flex-wrap gap-4 sm:gap-8 text-sm">
+            <div className="grid grid-cols-2 gap-3 text-sm sm:flex sm:flex-wrap sm:gap-8">
               {[
                 { label: 'Active Campaigns', value: data.stats.totalActiveCampaigns.toLocaleString() },
                 { label: 'Tiles in Use', value: data.stats.totalActiveTiles.toLocaleString() },
@@ -245,13 +248,13 @@ export default function LeaderboardPage() {
         </div>
 
         {/* Tabs */}
-        <div className="max-w-6xl mx-auto px-4">
+        <div className="max-w-6xl mx-auto px-3 sm:px-4">
           <div className="flex gap-0 overflow-x-auto scrollbar-none -mb-px">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`flex-shrink-0 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                className={`min-h-11 flex-shrink-0 px-3 sm:px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                   activeTab === tab.key
                     ? 'border-green-400 text-green-400'
                     : 'border-transparent text-white/40 hover:text-white/70'
@@ -264,7 +267,7 @@ export default function LeaderboardPage() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 py-6">
+      <div className="max-w-6xl mx-auto px-3 py-6 sm:px-4">
         {loading && (
           <div className="text-white/30 text-center py-20">Loading rankings...</div>
         )}
@@ -332,7 +335,7 @@ export default function LeaderboardPage() {
             <div className="mt-10 border border-green-400/15 bg-green-400/5 rounded-xl p-6 text-center">
               <div className="text-white font-bold mb-1">Want your campaign here?</div>
               <p className="text-white/40 text-sm mb-4">
-                Launch a campaign on the world&apos;s biggest internet billboard.
+                Rent tiles on the internet billboard powered by $BOARD.
               </p>
               <Link
                 href="/advertise"

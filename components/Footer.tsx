@@ -23,6 +23,7 @@ export default function Footer() {
             className="inline-flex w-fit rounded transition-opacity hover:opacity-85"
           >
             {/* Orynth serves this badge from an API endpoint; keep it unoptimized so it renders reliably. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="https://www.orynth.dev/api/badge/billionboard?theme=dark&style=default"
               alt="Featured on Orynth"

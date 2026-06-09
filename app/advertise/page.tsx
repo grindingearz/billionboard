@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
+import { trackEvent } from '@/lib/analytics'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Transaction, PublicKey } from '@solana/web3.js'
 import { getAssociatedTokenAddress, createTransferInstruction } from '@solana/spl-token'
@@ -10,8 +11,7 @@ import ImageUpload from '@/components/ImageUpload'
 import Loupe from '@/components/Loupe'
 import { BOARD_COLUMNS, BOARD_ROWS, tileIdToCoords, isRectangularSelection, runRectangularSelectionTests, canAffordCents, shortfallCents as balanceShortfallCents, runBalancePrecisionTests } from '@/lib/types'
 import type { TileInfoMap, DisplayMode } from '@/lib/types'
-import { CAMPAIGN_PACKAGES, computeCampaignPrice } from '@/lib/campaign-pricing'
-import type { DurationType } from '@/lib/campaign-pricing'
+import type { DurationType } from '@/lib/pricing'
 
 type AuthState = 'idle' | 'logging_in' | 'logged_in'
 type Step = 'select' | 'creative' | 'review' | 'submitted'
@@ -38,8 +38,12 @@ export default function AdvertisePage() {
   const [authState, setAuthState] = useState<AuthState>('idle')
   const [balance, setBalance] = useState<number | null>(null)
   const [tiles, setTiles] = useState<TileInfoMap>({})
-  const [tilePrice, setTilePrice] = useState(1)
-  const [freeRental, setFreeRental] = useState({ enabled: false, days: 0 })
+  const [freeRental, setFreeRental] = useState({ enabled: false })
+  const [campaignPackages, setCampaignPackages] = useState({
+    DAILY: { days: 1, totalPerTile: 1.0, dailyPerTile: 1.0 },
+    WEEKLY: { days: 7, totalPerTile: 5.6, dailyPerTile: 0.8 },
+    MONTHLY: { days: 30, totalPerTile: 15.0, dailyPerTile: 0.5 },
+  })
   const [autoApproveEnabled, setAutoApproveEnabled] = useState(true)
   const [submittedAutoApproved, setSubmittedAutoApproved] = useState(false)
   const [selectedTiles, setSelectedTiles] = useState<Set<number>>(new Set())
@@ -101,6 +105,8 @@ export default function AdvertisePage() {
   const fitH = fitW / aspect
   const boardW = fitW * zoom
   const boardH = fitH * zoom
+
+  useEffect(() => { trackEvent('PAGE_VIEW', '/advertise') }, [])
 
   // Observe container resize to compute fit dimensions
   useEffect(() => {
@@ -226,11 +232,16 @@ export default function AdvertisePage() {
       const res = await fetch('/api/settings')
       if (res.ok) {
         const data = await res.json()
-        const price = parseFloat(data.settings.tile_price_usd_per_day ?? '1') || 1
-        setTilePrice(price)
         setFreeRental({
           enabled: data.settings.free_rental_enabled === 'true',
-          days: parseInt(data.settings.free_rental_days, 10) || 0,
+        })
+        const daily = Math.max(0, parseFloat(data.settings.daily_price_per_tile ?? '1') || 1)
+        const weekly = Math.max(0, parseFloat(data.settings.weekly_price_per_tile ?? '5.60') || 5.6)
+        const monthly = Math.max(0, parseFloat(data.settings.monthly_price_per_tile ?? '15.00') || 15)
+        setCampaignPackages({
+          DAILY: { days: 1, totalPerTile: daily, dailyPerTile: daily },
+          WEEKLY: { days: 7, totalPerTile: weekly, dailyPerTile: weekly / 7 },
+          MONTHLY: { days: 30, totalPerTile: monthly, dailyPerTile: monthly / 30 },
         })
         setAutoApproveEnabled(data.settings.auto_approve_ads !== 'false')
       }
@@ -559,35 +570,59 @@ export default function AdvertisePage() {
     }
     // form.destUrl holds the domain portion; compose full URL before sending
     const fullDestUrl = `https://${form.destUrl.trim()}`
-    const res = await fetch('/api/rentals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
-      body: JSON.stringify({
-        tileIds: Array.from(selectedTiles),
-        imageUrl: form.imageUrl,
-        destUrl: fullDestUrl,
-        altText: form.altText,
-        displayMode,
-        durationType,
-        totalPrice: campaignTotal,
-        autoRenew,
-      }),
-    })
-    const data = await res.json()
-    if (res.ok) {
-      setSubmittedAutoApproved((data as { autoApproved?: boolean }).autoApproved ?? false)
-      setStep('submitted')
-      await Promise.all([loadTiles(), loadMyAds()])
+    const ids = Array.from(selectedTiles)
+
+    // Send compact rectangle payload when possible to avoid large JSON bodies
+    let selectionInput: Record<string, unknown>
+    if (isRectangularSelection(ids)) {
+      let minRow = Infinity, maxRow = -Infinity, minCol = Infinity, maxCol = -Infinity
+      for (const id of ids) {
+        const row = Math.floor(id / BOARD_COLUMNS)
+        const col = id % BOARD_COLUMNS
+        if (row < minRow) minRow = row
+        if (row > maxRow) maxRow = row
+        if (col < minCol) minCol = col
+        if (col > maxCol) maxCol = col
+      }
+      selectionInput = { mode: 'rectangle', startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol }
     } else {
-      setError(data.error ?? 'Submission failed')
+      selectionInput = { mode: 'tileIds', tileIds: ids }
     }
-    setSubmitting(false)
+
+    try {
+      const res = await fetch('/api/rentals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-wallet-address': publicKey.toBase58() },
+        body: JSON.stringify({
+          selectionInput,
+          imageUrl: form.imageUrl,
+          destUrl: fullDestUrl,
+          altText: form.altText,
+          displayMode,
+          durationType,
+          totalPrice: campaignTotal,
+          autoRenew,
+        }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setSubmittedAutoApproved((data as { autoApproved?: boolean }).autoApproved ?? false)
+        setStep('submitted')
+        await Promise.all([loadTiles(), loadMyAds()])
+      } else {
+        setError((data as { error?: string }).error ?? 'Submission failed')
+      }
+    } catch {
+      setError('Network error — please check your connection and try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  const campaignPricing = computeCampaignPrice(durationType, selectedTiles.size)
-  const campaignTotal = campaignPricing.totalPrice
-  const campaignDailyRevenue = campaignPricing.dailyRecognizedRevenue
-  const campaignDays = campaignPricing.durationDays
+  const _campaignPkg = campaignPackages[durationType]
+  const campaignTotal = Math.round(selectedTiles.size * _campaignPkg.totalPerTile * 100) / 100
+  const campaignDailyRevenue = Math.round(selectedTiles.size * _campaignPkg.dailyPerTile * 100) / 100
+  const campaignDays = _campaignPkg.days
   const canAfford = freeRental.enabled || (balance !== null && canAffordCents(balance, campaignTotal))
 
   const blockInfo = useMemo(() => {
@@ -608,7 +643,7 @@ export default function AdvertisePage() {
   // ── Connect wallet screen ────────────────────────────────────────────────────
   if (authState !== 'logged_in') {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="min-h-dvh flex items-center justify-center px-3 sm:px-4">
         <div className="w-full max-w-sm text-center">
           <h1 className="text-2xl font-black text-white mb-2">Advertise on BillionBoard</h1>
           <p className="text-white/40 text-sm mb-8">Connect your Solana wallet to select tiles and launch your ad.</p>
@@ -630,7 +665,7 @@ export default function AdvertisePage() {
   // ── Submitted screen ────────────────────────────────────────────────────────
   if (step === 'submitted') {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="min-h-dvh flex items-center justify-center px-3 sm:px-4">
         <div className="text-center max-w-sm">
           <div className="text-4xl mb-4">✓</div>
           <h2 className="text-2xl font-black text-white mb-2">
@@ -665,26 +700,26 @@ export default function AdvertisePage() {
 
   // ── Main advertise layout ────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col" style={{ height: 'calc(100vh - 56px)' }}>
+    <div className="flex flex-col" style={{ height: 'calc(100dvh - var(--nav-height))' }}>
 
       {/* ── Top bar: balance + topup ── */}
-      <div className="flex-shrink-0 border-b border-white/10 px-4 py-2.5">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-4 flex-wrap">
+      <div className="flex-shrink-0 border-b border-white/10 px-3 py-2.5 sm:px-4">
+        <div className="max-w-7xl mx-auto flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
             <div className="text-xs text-white/40 uppercase tracking-widest">Balance</div>
             <div className="font-mono font-bold text-white text-sm">
               ${balance?.toFixed(2) ?? '…'} USDC
             </div>
             <button
               onClick={() => { setShowTopup((v) => !v); setShowMyAds(false) }}
-              className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded transition-colors"
+              className="min-h-9 text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded transition-colors"
             >
               + Top up
             </button>
             {myAds.length > 0 && (
               <button
                 onClick={() => { setShowMyAds((v) => !v); setShowTopup(false) }}
-                className={`text-xs px-3 py-1 rounded transition-colors ${showMyAds ? 'bg-blue-400/20 text-blue-300' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+                className={`min-h-9 text-xs px-3 py-1 rounded transition-colors ${showMyAds ? 'bg-blue-400/20 text-blue-300' : 'bg-white/10 hover:bg-white/20 text-white'}`}
               >
                 My Ads ({myAds.length})
               </button>
@@ -692,10 +727,10 @@ export default function AdvertisePage() {
             {topupSuccess && <span className="text-green-400 text-xs font-medium">USDC added!</span>}
             {topupError && <span className="text-red-400 text-xs">{topupError}</span>}
           </div>
-          <div className="flex items-center gap-2 text-xs text-white/40">
-            {freeRental.enabled && freeRental.days > 0 && (
+          <div className="flex items-center gap-2 text-xs text-white/40 overflow-x-auto scrollbar-none">
+            {freeRental.enabled && (
               <span className="text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full text-[10px] font-medium">
-                First {freeRental.days}d free
+                Free mode
               </span>
             )}
             <span className="text-white font-bold">{selectedTiles.size}</span> tiles
@@ -704,7 +739,7 @@ export default function AdvertisePage() {
               {freeRental.enabled
                 ? '$0 (free)'
                 : selectedTiles.size === 0
-                  ? `$${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)}/tile`
+                  ? `$${campaignPackages[durationType].totalPerTile.toFixed(2)}/tile`
                   : `$${campaignTotal.toFixed(2)} total`}
             </span>
           </div>
@@ -712,7 +747,7 @@ export default function AdvertisePage() {
 
         {/* ── Expanded top-up panel ── */}
         {showTopup && (
-          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-4 bg-white/2 space-y-4">
+          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-3 sm:p-4 bg-white/2 space-y-4">
 
             {/* Wallet — connected wallet is primary, manual paste is fallback */}
             {publicKey ? (
@@ -739,8 +774,8 @@ export default function AdvertisePage() {
                 <p className="text-xs text-white/50">
                   Top up instantly with USDC from your connected wallet.
                 </p>
-                <div className="flex items-center gap-2">
-                  <div className="relative">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[112px] flex-1 sm:flex-none">
                     <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-white/40 text-xs pointer-events-none">$</span>
                     <input
                       type="number"
@@ -748,14 +783,14 @@ export default function AdvertisePage() {
                       step="any"
                       value={topupAmount}
                       onChange={(e) => setTopupAmount(e.target.value)}
-                      className="w-24 bg-white/5 border border-white/10 rounded-lg pl-5 pr-2 py-1.5 text-white text-xs focus:outline-none focus:border-green-400"
+                      className="w-full sm:w-24 min-h-10 bg-white/5 border border-white/10 rounded-lg pl-5 pr-2 py-1.5 text-white text-sm sm:text-xs focus:outline-none focus:border-green-400"
                     />
                   </div>
                   <span className="text-white/30 text-xs">USDC</span>
                   <button
                     onClick={handlePayUsdc}
                     disabled={topping}
-                    className="text-xs bg-green-400/20 hover:bg-green-400/30 border border-green-400/30 text-green-400 px-4 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                    className="min-h-10 text-xs bg-green-400/20 hover:bg-green-400/30 border border-green-400/30 text-green-400 px-4 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                   >
                     Pay ${topupAmount || '0'} USDC
                   </button>
@@ -819,7 +854,7 @@ export default function AdvertisePage() {
             {/* Dev-only mock top-up — admin wallet only */}
             {process.env.NODE_ENV !== 'production' &&
              publicKey?.toBase58() === process.env.NEXT_PUBLIC_ADMIN_WALLET && (
-              <form onSubmit={handleMockTopup} className="flex items-center gap-2 pt-2 border-t border-white/5">
+              <form onSubmit={handleMockTopup} className="flex flex-wrap items-center gap-2 pt-2 border-t border-white/5">
                 <span className="text-[10px] text-amber-400/60 uppercase tracking-widest">Dev only</span>
                 <input
                   type="number"
@@ -827,12 +862,12 @@ export default function AdvertisePage() {
                   max="10000"
                   value={topupAmount}
                   onChange={(e) => setTopupAmount(e.target.value)}
-                  className="w-20 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-amber-400"
+                  className="w-24 min-h-10 bg-white/5 border border-white/10 rounded px-2 py-1 text-white text-sm sm:text-xs focus:outline-none focus:border-amber-400"
                 />
                 <button
                   type="submit"
                   disabled={topping}
-                  className="text-xs bg-amber-400/10 hover:bg-amber-400/20 text-amber-400 px-3 py-1 rounded transition-colors disabled:opacity-50"
+                  className="min-h-10 text-xs bg-amber-400/10 hover:bg-amber-400/20 text-amber-400 px-3 py-1 rounded transition-colors disabled:opacity-50"
                 >
                   {topping ? '…' : 'Mock top-up'}
                 </button>
@@ -843,7 +878,7 @@ export default function AdvertisePage() {
 
         {/* ── My Ads panel ── */}
         {showMyAds && myAds.length > 0 && (
-          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-4 bg-white/2 space-y-3">
+          <div className="max-w-7xl mx-auto mt-3 border border-white/10 rounded-xl p-3 sm:p-4 bg-white/2 space-y-3">
             <div className="text-xs text-white/50 uppercase tracking-widest">Active Campaigns</div>
             {myAds.map((ad) => {
               const endDate = ad.campaignEndAt ? new Date(ad.campaignEndAt) : null
@@ -851,7 +886,7 @@ export default function AdvertisePage() {
                 ? Math.max(0, ad.totalPrice - ad.recognizedAmount)
                 : null
               return (
-                <div key={ad.id} className="flex items-start justify-between gap-4 p-3 border border-white/10 rounded-lg bg-white/2">
+                <div key={ad.id} className="flex flex-col gap-3 p-3 border border-white/10 rounded-lg bg-white/2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                   <div className="space-y-0.5 min-w-0">
                     <div className="text-sm text-white font-medium truncate">{ad.destinationDomain}</div>
                     <div className="text-xs text-white/40 font-mono">
@@ -888,7 +923,7 @@ export default function AdvertisePage() {
                         setTogglingAutoRenew(null)
                       }
                     }}
-                    className={`flex-shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
+                    className={`min-h-10 flex-shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
                       ad.autoRenew
                         ? 'border-green-400/40 text-green-400 bg-green-400/10 hover:bg-green-400/20'
                         : 'border-white/20 text-white/50 bg-white/5 hover:bg-white/10'
@@ -904,15 +939,16 @@ export default function AdvertisePage() {
       </div>
 
       {/* ── Step indicator ── */}
-      <div className="flex-shrink-0 border-b border-white/10 px-4 py-2">
-        <div className="max-w-7xl mx-auto flex gap-4 text-xs">
+      <div className="flex-shrink-0 border-b border-white/10 px-3 py-2 sm:px-4">
+        <div className="max-w-7xl mx-auto flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+          <div className="flex gap-2 overflow-x-auto text-xs scrollbar-none sm:gap-4">
           {(['select', 'creative', 'review'] as Step[]).map((s, i) => (
             <button
               key={s}
               onClick={() => {
                 if (s === 'select' || (s === 'creative' && selectedTiles.size > 0)) setStep(s)
               }}
-              className={`flex items-center gap-1.5 transition-colors ${
+              className={`min-h-9 shrink-0 flex items-center gap-1.5 transition-colors ${
                 step === s ? 'text-white' : 'text-white/30 hover:text-white/60'
               }`}
             >
@@ -926,6 +962,15 @@ export default function AdvertisePage() {
               {s === 'select' ? 'Select Tiles' : s === 'creative' ? 'Upload Creative' : 'Review'}
             </button>
           ))}
+          </div>
+          {publicKey?.toBase58() === process.env.NEXT_PUBLIC_ADMIN_WALLET && (
+            <a
+              href="/admin/free-ads/new"
+            className="text-[11px] text-amber-400/60 hover:text-amber-400 transition-colors whitespace-nowrap"
+            >
+              Admin? Create a free seed ad →
+            </a>
+          )}
         </div>
       </div>
 
@@ -935,7 +980,7 @@ export default function AdvertisePage() {
           {/* Scrollable zoom viewport */}
           <div
             ref={boardContainerRef}
-            className="absolute inset-0 overflow-auto"
+            className="absolute inset-0 overflow-auto overscroll-contain"
           >
             {/* Inner wrapper: min-w/h-full so flex centering works at zoom=1 (contain)
                 and the scroll area is never smaller than the board at higher zooms */}
@@ -976,17 +1021,17 @@ export default function AdvertisePage() {
               viewportX={loupeCursor.viewportX}
               viewportY={loupeCursor.viewportY}
               containerRect={boardContainerRef.current?.getBoundingClientRect() ?? null}
-              tilePrice={tilePrice}
+              tilePrice={freeRental.enabled ? 0 : campaignPackages[durationType].dailyPerTile}
             />
           )}
 
           {/* Floating bottom-left: selection mode + zoom controls + legend */}
-          <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-2 items-start">
+          <div className="absolute bottom-24 left-2 right-2 z-20 flex flex-col gap-2 items-start pointer-events-none sm:bottom-3 sm:left-3 sm:right-auto">
             {/* Selection mode toggle */}
-            <div className="flex items-center bg-black/80 border border-white/10 rounded-lg overflow-hidden">
+            <div className="max-w-full flex items-center bg-black/80 border border-white/10 rounded-lg overflow-hidden pointer-events-auto">
               <button
                 onClick={() => { setSelectionMode('click'); setBoxSelectError('') }}
-                className={`px-3 py-1.5 text-xs transition-colors ${
+                className={`min-h-10 px-3 py-1.5 text-xs transition-colors ${
                   selectionMode === 'click'
                     ? 'bg-blue-600/30 text-blue-300 font-semibold'
                     : 'text-white/40 hover:text-white/70'
@@ -998,7 +1043,7 @@ export default function AdvertisePage() {
               <div className="w-px h-4 bg-white/10" />
               <button
                 onClick={() => { setSelectionMode('box'); setBoxSelectError('') }}
-                className={`px-3 py-1.5 text-xs transition-colors ${
+                className={`min-h-10 px-3 py-1.5 text-xs transition-colors ${
                   selectionMode === 'box'
                     ? 'bg-blue-600/30 text-blue-300 font-semibold'
                     : 'text-white/40 hover:text-white/70'
@@ -1010,7 +1055,7 @@ export default function AdvertisePage() {
             </div>
 
             {/* Legend */}
-            <div className="flex items-center gap-3 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white/40">
+            <div className="hidden sm:flex items-center gap-3 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white/40 pointer-events-auto">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-sm bg-[#141414] border border-white/20" />
                 Available
@@ -1030,11 +1075,11 @@ export default function AdvertisePage() {
             </div>
 
             {/* Zoom controls */}
-            <div className="flex items-center gap-1 bg-black/80 border border-white/10 rounded-lg px-2 py-1">
+            <div className="max-w-full flex items-center gap-1 bg-black/80 border border-white/10 rounded-lg px-2 py-1 pointer-events-auto overflow-x-auto scrollbar-none">
               <button
                 onClick={zoomOut}
                 disabled={zoomIdx === 0}
-                className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
+                className="w-9 h-9 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
                 title="Zoom out"
               >
                 −
@@ -1045,7 +1090,7 @@ export default function AdvertisePage() {
               <button
                 onClick={zoomIn}
                 disabled={zoomIdx === ZOOM_LEVELS.length - 1}
-                className="w-6 h-6 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
+                className="w-9 h-9 flex items-center justify-center text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold"
                 title="Zoom in"
               >
                 +
@@ -1053,7 +1098,7 @@ export default function AdvertisePage() {
               <span className="text-white/20 mx-0.5">|</span>
               <button
                 onClick={() => setZoomIdx(0)}
-                className="text-xs text-white/50 hover:text-white transition-colors px-1"
+                className="min-h-9 text-xs text-white/50 hover:text-white transition-colors px-2"
                 title="Fit to screen"
               >
                 Fit
@@ -1062,7 +1107,7 @@ export default function AdvertisePage() {
               <span className="text-white/20 mx-0.5">|</span>
               <button
                 onClick={() => setLoupeEnabled((v) => !v)}
-                className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                className={`min-h-9 text-xs px-2 py-0.5 rounded transition-colors ${
                   loupeEnabled
                     ? 'text-green-400 bg-green-400/10 hover:bg-green-400/20'
                     : 'text-white/40 hover:text-white/70'
@@ -1075,17 +1120,17 @@ export default function AdvertisePage() {
           </div>
 
           {/* Floating bottom-right: hints + action bar */}
-          <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-2">
+          <div className="absolute bottom-2 left-2 right-2 z-20 flex flex-col items-stretch gap-2 pointer-events-none sm:bottom-3 sm:left-auto sm:right-3 sm:items-end">
             {/* Box select error */}
             {boxSelectError && (
-              <div className="text-xs text-amber-400 bg-black/90 border border-amber-400/20 rounded-lg px-3 py-2 max-w-[280px] text-right">
+              <div className="text-xs text-amber-400 bg-black/90 border border-amber-400/20 rounded-lg px-3 py-2 max-w-full sm:max-w-[280px] sm:text-right pointer-events-auto">
                 {boxSelectError}
               </div>
             )}
 
             {/* Hint when nothing selected */}
             {selectedTiles.size === 0 && !boxSelectError && (
-              <div className="text-xs text-white/30 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+              <div className="text-xs text-white/30 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 sm:text-right pointer-events-auto">
                 {selectionMode === 'click'
                   ? 'Click tiles to select · Tip: use Box Select for larger blocks'
                   : 'Click and drag to select a rectangular block'}
@@ -1094,7 +1139,7 @@ export default function AdvertisePage() {
 
             {/* Block info when selection exists */}
             {selectedTiles.size > 0 && blockInfo && (
-              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 sm:text-right pointer-events-auto">
                 <span className="text-blue-300 font-mono">
                   {blockInfo.cols} × {blockInfo.rows} block = {selectedTiles.size} tiles
                 </span>
@@ -1107,7 +1152,7 @@ export default function AdvertisePage() {
 
             {/* Tile count when selection is not a rectangle */}
             {selectedTiles.size > 0 && !blockInfo && (
-              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 text-right">
+              <div className="text-xs bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 sm:text-right pointer-events-auto">
                 <span className="text-white/60 font-mono">{selectedTiles.size} tiles</span>
                 <span className="text-white/30 mx-1.5">·</span>
                 <span className="text-green-400">
@@ -1120,7 +1165,7 @@ export default function AdvertisePage() {
             {selectedTiles.size > 0 && (
               <button
                 onClick={() => { setSelectedTiles(new Set()); setBoxSelectError('') }}
-                className="text-xs text-white/40 hover:text-white/70 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 transition-colors"
+                className="min-h-10 text-xs text-white/40 hover:text-white/70 bg-black/80 border border-white/10 rounded-lg px-3 py-1.5 transition-colors pointer-events-auto"
               >
                 Clear selection
               </button>
@@ -1129,7 +1174,7 @@ export default function AdvertisePage() {
             <button
               onClick={() => setStep('creative')}
               disabled={selectedTiles.size === 0}
-              className="bg-green-400 hover:bg-green-300 disabled:opacity-40 disabled:cursor-not-allowed text-black font-bold px-5 py-2.5 rounded-xl text-sm transition-colors shadow-lg shadow-green-400/20"
+              className="min-h-11 bg-green-400 hover:bg-green-300 disabled:opacity-40 disabled:cursor-not-allowed text-black font-bold px-4 sm:px-5 py-2.5 rounded-xl text-xs sm:text-sm transition-colors shadow-lg shadow-green-400/20 pointer-events-auto"
             >
               Next: Upload Creative ({selectedTiles.size} tile{selectedTiles.size !== 1 ? 's' : ''}
               {freeRental.enabled ? ' — Free' : ` — $${campaignTotal.toFixed(2)} total`}) →
@@ -1141,7 +1186,7 @@ export default function AdvertisePage() {
       {/* ── Step: creative (scrollable form) ── */}
       {step === 'creative' && (
         <div className="flex-1 overflow-auto min-h-0">
-          <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
+          <div className="max-w-xl mx-auto px-3 py-6 space-y-5 sm:px-4 sm:py-8">
             <h2 className="text-lg font-bold text-white">Your Ad Creative</h2>
 
             {/* Duration selector */}
@@ -1150,8 +1195,8 @@ export default function AdvertisePage() {
                 <label className="block text-xs text-white/50 uppercase tracking-widest mb-2">
                   Campaign Duration
                 </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(Object.entries(CAMPAIGN_PACKAGES) as [DurationType, typeof CAMPAIGN_PACKAGES[DurationType]][]).map(([key, pkg]) => {
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {(Object.entries(campaignPackages) as [DurationType, typeof campaignPackages[DurationType]][]).map(([key, pkg]) => {
                     const total = selectedTiles.size > 0 ? (selectedTiles.size * pkg.totalPerTile).toFixed(2) : `$${pkg.totalPerTile.toFixed(2)}/tile`
                     const isSelected = durationType === key
                     return (
@@ -1181,13 +1226,13 @@ export default function AdvertisePage() {
                 </div>
                 {selectedTiles.size > 0 && (
                   <p className="text-xs text-white/40 mt-2">
-                    {selectedTiles.size} tiles × ${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)} = <span className="text-green-400 font-mono">${campaignTotal.toFixed(2)} total</span> deducted upfront · ${campaignDailyRevenue.toFixed(2)}/day recognized over {campaignDays} day{campaignDays > 1 ? 's' : ''}
+                    {selectedTiles.size} tiles × ${campaignPackages[durationType].totalPerTile.toFixed(2)} = <span className="text-green-400 font-mono">${campaignTotal.toFixed(2)} total</span> deducted upfront · ${campaignDailyRevenue.toFixed(2)}/day recognized over {campaignDays} day{campaignDays > 1 ? 's' : ''}
                   </p>
                 )}
 
                 {/* Auto-renew toggle */}
                 <div
-                  className={`mt-3 flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+                    className={`mt-3 flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
                     autoRenew ? 'border-green-400/40 bg-green-400/5' : 'border-white/10 bg-white/5'
                   }`}
                   onClick={() => setAutoRenew((v) => !v)}
@@ -1200,7 +1245,7 @@ export default function AdvertisePage() {
                   <div>
                     <div className="text-sm font-medium text-white">Auto-renew from my BillionBoard balance</div>
                     <div className="text-xs text-white/40 mt-0.5 leading-snug">
-                      When this campaign ends, automatically renew for another {campaignDays} day{campaignDays > 1 ? 's' : ''} at ${campaignTotal > 0 ? campaignTotal.toFixed(2) : `$${CAMPAIGN_PACKAGES[durationType].totalPerTile.toFixed(2)}/tile`}. Only charges your deposited balance — never your wallet directly. You can turn this off anytime.
+                      When this campaign ends, automatically renew for another {campaignDays} day{campaignDays > 1 ? 's' : ''} at ${campaignTotal > 0 ? campaignTotal.toFixed(2) : `$${campaignPackages[durationType].totalPerTile.toFixed(2)}/tile`}. Only charges your deposited balance — never your wallet directly. You can turn this off anytime.
                     </div>
                   </div>
                 </div>
@@ -1224,7 +1269,7 @@ export default function AdvertisePage() {
                 Destination URL
               </label>
               <div className="flex items-stretch rounded-lg overflow-hidden border border-white/10 focus-within:border-green-400 transition-colors">
-                <span className="px-3 py-3 bg-white/3 text-white/30 text-sm flex items-center border-r border-white/10 shrink-0 select-none font-mono">
+                <span className="hidden px-3 py-3 bg-white/3 text-white/30 text-sm items-center border-r border-white/10 shrink-0 select-none font-mono sm:flex">
                   https://
                 </span>
                 <input
@@ -1237,7 +1282,7 @@ export default function AdvertisePage() {
                     setForm((f) => ({ ...f, destUrl: val }))
                   }}
                   placeholder="www.yourproject.com"
-                  className="flex-1 bg-white/5 px-3 py-3 text-white text-sm focus:outline-none placeholder-white/20"
+                  className="min-w-0 flex-1 bg-white/5 px-3 py-3 text-white text-base sm:text-sm focus:outline-none placeholder-white/20"
                 />
               </div>
               <p className="text-white/30 text-xs mt-1.5">Example: www.yourproject.com</p>
@@ -1253,7 +1298,7 @@ export default function AdvertisePage() {
                 value={form.altText}
                 onChange={(e) => setForm((f) => ({ ...f, altText: e.target.value }))}
                 placeholder="Brief description of your ad"
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-green-400"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-white/20 text-base sm:text-sm focus:outline-none focus:border-green-400"
               />
             </div>
 
@@ -1262,7 +1307,7 @@ export default function AdvertisePage() {
               <label className="block text-xs text-white/50 uppercase tracking-widest mb-2">
                 Display Mode
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid gap-2 sm:grid-cols-2">
                 <button
                   type="button"
                   onClick={() => { setDisplayMode('REPEAT'); setDisplayModeError('') }}
@@ -1308,10 +1353,10 @@ export default function AdvertisePage() {
               )}
             </div>
 
-            <div className="flex gap-3">
+            <div className="grid gap-3 sm:flex">
               <button
                 onClick={() => { setUrlError(''); setDisplayModeError(''); setStep('select') }}
-                className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
+                className="min-h-11 flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
               >
                 ← Back
               </button>
@@ -1335,7 +1380,7 @@ export default function AdvertisePage() {
                   setStep('review')
                 }}
                 disabled={!form.imageUrl.startsWith('https://') || !form.destUrl.trim()}
-                className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
+                className="min-h-11 flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
               >
                 Review →
               </button>
@@ -1347,44 +1392,44 @@ export default function AdvertisePage() {
       {/* ── Step: review ── */}
       {step === 'review' && (
         <div className="flex-1 overflow-auto min-h-0">
-          <div className="max-w-xl mx-auto px-4 py-8 space-y-5">
+          <div className="max-w-xl mx-auto px-3 py-6 space-y-5 sm:px-4 sm:py-8">
             <h2 className="text-lg font-bold text-white">Review your order</h2>
 
             <div className="border border-white/10 rounded-xl p-4 space-y-3">
-              <div className="flex justify-between text-sm">
+              <div className="flex items-start justify-between gap-4 text-sm">
                 <span className="text-white/50">Tiles selected</span>
                 <span className="text-white font-mono">{selectedTiles.size}</span>
               </div>
               {!freeRental.enabled && (
                 <>
-                  <div className="flex justify-between text-sm">
+                  <div className="flex items-start justify-between gap-4 text-sm">
                     <span className="text-white/50">Package</span>
                     <span className="text-white font-mono">
                       {durationType === 'DAILY' ? 'Daily' : durationType === 'WEEKLY' ? 'Weekly' : 'Monthly'} ({campaignDays} day{campaignDays > 1 ? 's' : ''})
                     </span>
                   </div>
-                  <div className="flex justify-between text-sm">
+                  <div className="flex items-start justify-between gap-4 text-sm">
                     <span className="text-white/50">Total (charged upfront)</span>
                     <span className="text-green-400 font-mono font-bold">${campaignTotal.toFixed(2)} USDC</span>
                   </div>
-                  <div className="flex justify-between text-sm">
+                  <div className="flex items-start justify-between gap-4 text-sm">
                     <span className="text-white/50">Daily recognition</span>
                     <span className="text-white/60 font-mono">${campaignDailyRevenue.toFixed(2)}/day</span>
                   </div>
-                  <div className="flex justify-between text-sm">
+                  <div className="flex items-start justify-between gap-4 text-sm">
                     <span className="text-white/50">Campaign ends</span>
                     <span className="text-white/60 font-mono">
                       {new Date(Date.now() + campaignDays * 86400000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                     </span>
                   </div>
-                  <div className="flex justify-between text-sm">
+                  <div className="flex items-start justify-between gap-4 text-sm">
                     <span className="text-white/50">Auto-renew</span>
                     <span className={`font-mono text-sm ${autoRenew ? 'text-green-400' : 'text-white/40'}`}>
                       {autoRenew ? `ON — renews at $${campaignTotal.toFixed(2)}` : 'OFF'}
                     </span>
                   </div>
                   {autoRenew && (
-                    <div className="flex justify-between text-sm">
+                    <div className="flex items-start justify-between gap-4 text-sm">
                       <span className="text-white/50">Next renewal cost</span>
                       <span className="text-white/60 font-mono">${campaignTotal.toFixed(2)} USDC</span>
                     </div>
@@ -1392,18 +1437,18 @@ export default function AdvertisePage() {
                 </>
               )}
               {freeRental.enabled && (
-                <div className="flex justify-between text-sm">
+                <div className="flex items-start justify-between gap-4 text-sm">
                   <span className="text-white/50">Cost</span>
-                  <span className="text-green-400 font-mono">$0 ({freeRental.days}d free)</span>
+                  <span className="text-green-400 font-mono">$0 (free mode)</span>
                 </div>
               )}
-              <div className="flex justify-between text-sm">
+              <div className="flex items-start justify-between gap-4 text-sm">
                 <span className="text-white/50">Your balance</span>
                 <span className={`font-mono ${canAfford ? 'text-green-400' : 'text-red-400'}`}>
                   ${balance?.toFixed(2) ?? '…'} USDC
                 </span>
               </div>
-              <div className="flex justify-between text-sm">
+              <div className="flex items-start justify-between gap-4 text-sm">
                 <span className="text-white/50">Display mode</span>
                 <span className="text-white font-mono">{displayMode === 'STRETCH' ? `Stretch (${blockInfo?.cols}×${blockInfo?.rows})` : 'Repeat'}</span>
               </div>
@@ -1424,11 +1469,11 @@ export default function AdvertisePage() {
             )}
 
             {!publicKey && (
-              <div className="bg-amber-900/30 border border-amber-500/30 rounded-lg p-3 text-amber-400 text-sm flex items-center justify-between">
+              <div className="bg-amber-900/30 border border-amber-500/30 rounded-lg p-3 text-amber-400 text-sm flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <span>Connect your wallet to submit your ad.</span>
                 <button
                   onClick={() => openWalletModal(true)}
-                  className="text-xs bg-amber-400/20 hover:bg-amber-400/30 text-amber-400 px-3 py-1.5 rounded transition-colors ml-3 flex-shrink-0"
+                  className="min-h-10 text-xs bg-amber-400/20 hover:bg-amber-400/30 text-amber-400 px-3 py-1.5 rounded transition-colors sm:ml-3 flex-shrink-0"
                 >
                   Connect
                 </button>
@@ -1456,17 +1501,17 @@ export default function AdvertisePage() {
               )}
             </div>
 
-            <div className="flex gap-3">
+            <div className="grid gap-3 sm:flex">
               <button
                 onClick={() => setStep('creative')}
-                className="flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
+                className="min-h-11 flex-1 border border-white/20 text-white/70 hover:text-white py-2.5 rounded-lg text-sm transition-colors"
               >
                 ← Back
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={submitting || !canAfford || !publicKey}
-                className="flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
+                className="min-h-11 flex-1 bg-green-400 hover:bg-green-300 disabled:opacity-40 text-black font-bold py-2.5 rounded-lg text-sm transition-colors"
               >
                 {submitting ? 'Submitting…' : autoApproveEnabled ? 'Go Live →' : 'Submit for approval'}
               </button>

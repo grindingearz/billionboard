@@ -30,6 +30,8 @@ interface DashboardAd {
   status: string
   activatedAt: string | null
   nextBillingAt: string | null
+  clicksTotal: number
+  clicks24h: number
 }
 
 interface DashboardData {
@@ -87,9 +89,10 @@ export default function WalletButton() {
       <button
         onClick={() => setVisible(true)}
         disabled={connecting}
-        className="ml-2 bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black text-xs font-bold px-3 py-1.5 rounded transition-colors"
+        className="ml-1 min-h-9 shrink-0 bg-green-400 hover:bg-green-300 disabled:opacity-50 text-black text-xs font-bold px-3 py-1.5 rounded transition-colors sm:ml-2"
       >
-        {connecting ? 'Connecting…' : 'Connect Wallet'}
+        <span className="sm:hidden">{connecting ? '…' : 'Wallet'}</span>
+        <span className="hidden sm:inline">{connecting ? 'Connecting…' : 'Connect Wallet'}</span>
       </button>
     )
   }
@@ -101,10 +104,10 @@ export default function WalletButton() {
   const hasMore = (data?.ads.length ?? 0) > 3
 
   return (
-    <div ref={ref} className="relative ml-2">
+    <div ref={ref} className="relative ml-1 sm:ml-2">
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`border text-xs font-bold px-3 py-1.5 rounded transition-colors font-mono ${
+        className={`min-h-9 border text-xs font-bold px-3 py-1.5 rounded transition-colors font-mono ${
           showWarning
             ? 'bg-red-400/10 hover:bg-red-400/20 border-red-400/30 text-red-400'
             : 'bg-green-400/10 hover:bg-green-400/20 border-green-400/30 text-green-400'
@@ -114,7 +117,7 @@ export default function WalletButton() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 bg-black border border-white/10 rounded-xl shadow-2xl z-50 w-72">
+        <div className="fixed left-2 right-2 top-16 bg-black border border-white/10 rounded-xl shadow-2xl z-50 max-h-[calc(100dvh-5rem)] overflow-auto sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72 sm:max-h-none">
           {/* Address */}
           <div className="px-4 py-3 border-b border-white/5">
             <div className="text-[10px] text-white/30 uppercase tracking-widest mb-0.5">Connected wallet</div>
@@ -185,16 +188,20 @@ export default function WalletButton() {
                 <div className="px-4 py-2 border-b border-white/5 space-y-1.5">
                   <div className="text-[10px] text-white/25 uppercase tracking-widest mb-1">Active ads</div>
                   {visibleAds.map((ad) => (
-                    <div key={ad.id} className="flex items-center justify-between gap-2 text-[10px]">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-white/70 font-medium truncate">{ad.destinationDomain}</div>
-                        <div className="text-white/30 font-mono">
-                          {ad.tileCount} tile{ad.tileCount !== 1 ? 's' : ''} · {ad.displayMode === 'STRETCH' ? 'Stretch' : 'Repeat'} · ${ad.dailyRate.toFixed(2)}/day
-                        </div>
+                    <div key={ad.id} className="text-[10px] space-y-0.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-white/70 font-medium truncate flex-1 min-w-0">{ad.destinationDomain}</div>
+                        {ad.nextBillingAt && (
+                          <div className="text-white/25 font-mono flex-shrink-0">{fmtDate(ad.nextBillingAt)}</div>
+                        )}
                       </div>
-                      {ad.nextBillingAt && (
-                        <div className="text-white/25 font-mono flex-shrink-0">{fmtDate(ad.nextBillingAt)}</div>
-                      )}
+                      <div className="text-white/30 font-mono">
+                        {ad.tileCount} tile{ad.tileCount !== 1 ? 's' : ''} · ${ad.dailyRate.toFixed(2)}/day
+                      </div>
+                      <div className="text-white/40 font-mono">
+                        {ad.clicksTotal} click{ad.clicksTotal !== 1 ? 's' : ''} total
+                        {ad.clicks24h > 0 && <span className="text-green-400/70"> · {ad.clicks24h} today</span>}
+                      </div>
                     </div>
                   ))}
                   {hasMore && (
@@ -214,13 +221,13 @@ export default function WalletButton() {
                 <Link
                   href="/advertise"
                   onClick={() => setOpen(false)}
-                  className="block w-full text-center bg-green-400/10 hover:bg-green-400/20 border border-green-400/20 text-green-400 text-xs font-bold py-2 rounded-lg transition-colors"
+                  className="block w-full min-h-10 text-center bg-green-400/10 hover:bg-green-400/20 border border-green-400/20 text-green-400 text-xs font-bold py-2.5 rounded-lg transition-colors"
                 >
                   {data.activeAdsCount === 0 ? 'Advertise' : 'Top Up / Advertise More'}
                 </Link>
                 <button
                   onClick={() => { disconnect(); setOpen(false) }}
-                  className="w-full text-center bg-white/3 hover:bg-white/8 border border-white/10 text-white/40 hover:text-red-400 text-xs py-2 rounded-lg transition-colors"
+                  className="w-full min-h-10 text-center bg-white/3 hover:bg-white/8 border border-white/10 text-white/40 hover:text-red-400 text-xs py-2.5 rounded-lg transition-colors"
                 >
                   Disconnect
                 </button>

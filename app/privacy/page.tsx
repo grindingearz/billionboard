@@ -6,7 +6,7 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <div className="min-h-screen max-w-3xl mx-auto px-4 py-12">
+    <div className="min-h-dvh max-w-3xl mx-auto px-3 py-8 sm:px-4 sm:py-12">
       <h1 className="text-3xl font-black text-white mb-2">Privacy Policy</h1>
       <p className="text-white/40 text-sm mb-10">Last updated: May 2026</p>
 
@@ -48,7 +48,16 @@ export default function PrivacyPage() {
               </p>
             </div>
             <div className="border border-white/10 rounded-lg p-4 bg-white/2">
-              <div className="text-white font-medium mb-1">Usage Data</div>
+              <div className="text-white font-medium mb-1">Usage Analytics</div>
+              <p>
+                We collect basic usage analytics such as page views, board views, referrers, and ad
+                clicks to measure platform performance and advertiser activity. Analytics events are
+                associated with an anonymous per-session identifier stored in your browser&apos;s
+                sessionStorage. No IP address or device fingerprint is stored in analytics records.
+              </p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4 bg-white/2">
+              <div className="text-white font-medium mb-1">Server Logs</div>
               <p>
                 We may collect standard server logs (IP addresses, browser type, pages visited) for
                 security and performance monitoring. Logs are retained for a limited period.

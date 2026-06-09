@@ -3,38 +3,54 @@ import { prisma } from '@/lib/prisma'
 import HomeBillboard from '@/components/HomeBillboard'
 import { TOTAL_TILES } from '@/lib/types'
 import type { TileInfoMap } from '@/lib/types'
-import { getAllSettings } from '@/lib/settings'
+import { getAllSettings, getCampaignPricing } from '@/lib/settings'
 
 export const dynamic = 'force-dynamic'
 
-async function getStats() {
+async function getPageData() {
+  const now = new Date()
   try {
-    const [activeTiles, pendingTiles] = await Promise.all([
-      prisma.adRental.count({ where: { status: 'ACTIVE' } }),
+    const [activeRentals, pendingTiles] = await Promise.all([
+      prisma.adRental.findMany({
+        where: { status: 'ACTIVE' },
+        select: {
+          tileId: true,
+          creativeId: true,
+          nextBillingAt: true,
+          creative: {
+            select: {
+              imageUrl: true,
+              destUrl: true,
+              altText: true,
+              displayMode: true,
+              campaignType: true,
+              durationType: true,
+              campaignStartAt: true,
+              campaignEndAt: true,
+            },
+          },
+        },
+      }),
       prisma.adRental.count({ where: { status: 'PENDING_APPROVAL' } }),
     ])
-    return {
-      activeTiles,
-      pendingTiles,
-      availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
-    }
-  } catch {
-    return { activeTiles: 0, pendingTiles: 0, availableTiles: TOTAL_TILES }
-  }
-}
 
-async function getTileData(): Promise<TileInfoMap> {
-  try {
-    const rentals = await prisma.adRental.findMany({
-      where: { status: 'ACTIVE' },
-      select: {
-        tileId: true,
-        creativeId: true,
-        creative: { select: { imageUrl: true, destUrl: true, altText: true, displayMode: true } },
-      },
-    })
     const tiles: TileInfoMap = {}
-    for (const r of rentals) {
+    for (const r of activeRentals) {
+      const campaignType = r.creative?.campaignType ?? 'PAID'
+
+      // PAID campaigns: enforce time validity so overdue ads never render on the board
+      if (campaignType !== 'ADMIN_FREE') {
+        if (r.creative?.durationType) {
+          // Duration campaign: must be within [campaignStartAt, campaignEndAt)
+          const startOk = !r.creative.campaignStartAt || r.creative.campaignStartAt.getTime() <= now.getTime()
+          const endOk = r.creative.campaignEndAt != null && r.creative.campaignEndAt.getTime() > now.getTime()
+          if (!startOk || !endOk) continue
+        } else {
+          // Legacy per-day: nextBillingAt must exist and be in the future
+          if (r.nextBillingAt == null || r.nextBillingAt.getTime() <= now.getTime()) continue
+        }
+      }
+
       tiles[r.tileId] = {
         status: 'ACTIVE',
         creativeId: r.creativeId ?? undefined,
@@ -42,11 +58,26 @@ async function getTileData(): Promise<TileInfoMap> {
         destUrl: r.creative?.destUrl ?? undefined,
         altText: r.creative?.altText ?? undefined,
         displayMode: (r.creative?.displayMode ?? 'REPEAT') as 'REPEAT' | 'STRETCH',
+        campaignType: campaignType as 'PAID' | 'ADMIN_FREE',
       }
     }
-    return tiles
+
+    const activeTiles = Object.keys(tiles).length
+    const paidActiveTiles = Object.values(tiles).filter(t => t.campaignType !== 'ADMIN_FREE').length
+    return {
+      tiles,
+      stats: {
+        activeTiles,
+        paidActiveTiles,
+        pendingTiles,
+        availableTiles: TOTAL_TILES - activeTiles - pendingTiles,
+      },
+    }
   } catch {
-    return {}
+    return {
+      tiles: {},
+      stats: { activeTiles: 0, paidActiveTiles: 0, pendingTiles: 0, availableTiles: TOTAL_TILES },
+    }
   }
 }
 
@@ -61,68 +92,75 @@ export default async function HomePage({
 }: {
   searchParams: Promise<{ focusCampaign?: string }>
 }) {
-  const [stats, tiles, settings, sp] = await Promise.all([
-    getStats(),
-    getTileData(),
+  const [pageData, settings, campaignPricing, sp] = await Promise.all([
+    getPageData(),
     getAllSettings(),
+    getCampaignPricing(),
     searchParams,
   ])
+  const { tiles, stats } = pageData
   const focusCampaign = sp.focusCampaign
 
-  const tilePrice = Math.max(0, parseFloat(settings.tile_price_usd_per_day) || 1)
   const freeEnabled = settings.free_rental_enabled === 'true'
-  const freeDays = parseInt(settings.free_rental_days, 10) || 0
   const feePercent = Math.max(0, Math.min(100, parseFloat(settings.management_fee_percent) || 10))
   const distribPercent = 100 - feePercent
-  const priceDisplay = formatPrice(tilePrice)
+  const dailyDisplay = freeEnabled ? 'FREE' : formatPrice(campaignPricing.dailyPricePerTile)
   const boardMint = process.env.NEXT_PUBLIC_BOARD_MINT ?? ''
+  const homepageBanner = settings.homepage_banner_copy ?? ''
 
   const statsStrip = [
-    { value: stats.activeTiles.toLocaleString(), label: 'Rented', color: 'text-white' },
+    { value: stats.paidActiveTiles.toLocaleString(), label: 'Paid Tiles', color: 'text-white' },
     { value: stats.availableTiles.toLocaleString(), label: 'Available', color: 'text-white/60' },
-    { value: priceDisplay, label: 'Per Tile / Day', color: 'text-green-400' },
+    { value: dailyDisplay, label: 'Daily / Tile', color: 'text-green-400' },
     { value: `${distribPercent}%`, label: 'To Holders', color: 'text-green-400' },
   ]
 
   return (
     <div>
+      {/* Homepage banner (admin-controlled) */}
+      {homepageBanner && (
+        <div className="bg-amber-400/10 border-b border-amber-400/20 px-4 py-2 text-center text-xs text-amber-300">
+          {homepageBanner}
+        </div>
+      )}
+
       {/* Above-fold: hero strip + full-height board */}
-      <div className="flex flex-col" style={{ height: 'calc(100vh - 56px)' }}>
+      <div
+        className="flex flex-col"
+        style={{ height: homepageBanner ? 'calc(100dvh - var(--nav-height) - 32px)' : 'calc(100dvh - var(--nav-height))' }}
+      >
 
         {/* Hero strip */}
-        <div className="flex-shrink-0 px-4 py-3 border-b border-white/5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex-shrink-0 px-3 py-3 sm:px-4 border-b border-white/5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
 
             {/* Left: live badge + title + sublines */}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 mb-1.5">
                 <div className="inline-flex items-center gap-1.5 bg-green-400/10 border border-green-400/20 rounded-full px-2.5 py-1 text-[11px] text-green-400 font-medium whitespace-nowrap">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                  LIVE — {stats.activeTiles.toLocaleString()} tiles rented
+                  LIVE — {stats.paidActiveTiles.toLocaleString()} paid tiles
                 </div>
-                {freeEnabled && freeDays > 0 && (
+                {freeEnabled && (
                   <span className="hidden sm:inline-flex items-center gap-1 bg-amber-400/10 border border-amber-400/20 rounded-full px-2.5 py-1 text-[11px] text-amber-400 whitespace-nowrap">
-                    {freeDays}d free
-                    {tilePrice > 0 && <span className="text-amber-400/60"> · then {priceDisplay}</span>}
+                    Free mode active
                   </span>
                 )}
               </div>
-              <h1 className="text-xl sm:text-2xl lg:text-3xl font-black tracking-tight text-white leading-tight">
-                THE WORLD&apos;S BIGGEST{' '}
-                <span className="text-green-400">INTERNET BILLBOARD</span>
+              <h1 className="text-lg sm:text-2xl lg:text-3xl font-black tracking-tight text-white leading-tight">
+                THE INTERNET BILLBOARD{' '}
+                <span className="text-green-400">POWERED BY $BOARD</span>
               </h1>
               <p className="text-white/35 text-xs sm:text-sm mt-0.5 hidden sm:block">
-                1B pixels · 100,000 rentable tiles · Ads live instantly
+                100,000 tiles · 1 billion $BOARD · One internet billboard.
               </p>
               <p className="text-white/20 text-[11px] mt-0.5 hidden md:block">
-                {boardMint
-                  ? 'Earned fees flow transparently to the daily $BOARD distribution pool.'
-                  : 'Distribution activates after $BOARD launch.'}
+                Rent tiles. Own territory. Get seen by the $BOARD community. Recognized ad revenue flows into the distribution pool for eligible holders.
               </p>
             </div>
 
             {/* Right: stats + CTAs */}
-            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            <div className="flex flex-col gap-2 sm:items-end sm:flex-shrink-0">
               {/* Mini stats strip */}
               <div className="hidden sm:flex items-center divide-x divide-white/10">
                 {statsStrip.map(({ value, label, color }) => (
@@ -134,24 +172,24 @@ export default async function HomePage({
               </div>
 
               {/* CTAs */}
-              <div className="flex items-center gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
                 <Link
                   href="/advertise"
-                  className="bg-green-400 hover:bg-green-300 text-black font-bold px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap shadow-lg shadow-green-400/15"
+                  className="min-h-10 inline-flex items-center justify-center bg-green-400 hover:bg-green-300 text-black font-bold px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap shadow-lg shadow-green-400/15"
                 >
                   Rent Tiles →
                 </Link>
                 {boardMint ? (
                   <Link
                     href="/claim"
-                    className="border border-white/15 hover:border-white/35 text-white/60 hover:text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
+                    className="min-h-10 inline-flex items-center justify-center border border-white/15 hover:border-white/35 text-white/60 hover:text-white font-medium px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap"
                   >
                     Claim Revenue
                   </Link>
                 ) : (
                   <Link
                     href="/stats"
-                    className="border border-white/15 hover:border-white/35 text-white/60 hover:text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
+                    className="min-h-10 inline-flex items-center justify-center border border-white/15 hover:border-white/35 text-white/60 hover:text-white font-medium px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm transition-colors whitespace-nowrap"
                   >
                     View Fee Pool
                   </Link>
@@ -163,7 +201,7 @@ export default async function HomePage({
 
         {/* Board viewport — fills remaining screen height */}
         <div className="flex-1 min-h-0">
-          <HomeBillboard tiles={tiles} tilePrice={tilePrice} focusCampaign={focusCampaign} />
+          <HomeBillboard tiles={tiles} tilePrice={campaignPricing.dailyPricePerTile} focusCampaign={focusCampaign} />
         </div>
       </div>
 
@@ -175,7 +213,7 @@ export default async function HomePage({
             {
               n: '01',
               title: 'Rent tiles',
-              body: `Pick tiles on the grid, upload your ad, add your destination URL. Pay ${priceDisplay} USDC per tile per day.`,
+              body: `Pick tiles on the grid, upload your ad, add your destination URL. Starting from ${dailyDisplay} USDC per tile for a daily campaign.`,
             },
             {
               n: '02',
@@ -185,12 +223,12 @@ export default async function HomePage({
             {
               n: '03',
               title: 'Revenue pools daily',
-              body: `Every day's rent accumulates in the claim pool. ${distribPercent}% flows to $BOARD holders each epoch.`,
+              body: `Recognized ad revenue accumulates in the distribution pool. ${distribPercent}% flows to eligible $BOARD holders each epoch.`,
             },
             {
               n: '04',
-              title: 'Holders claim',
-              body: 'Connect your wallet and claim your pro-rata share of daily billboard revenue based on your $BOARD balance.',
+              title: 'Eligible holders claim',
+              body: 'Connect your wallet and claim your snapshot-based share of the distribution pool based on your $BOARD balance.',
             },
           ].map(({ n, title, body }) => (
             <div
@@ -211,13 +249,13 @@ export default async function HomePage({
               <div className="text-xs text-green-400/70 uppercase tracking-widest mb-2">Live on Solana</div>
               <div className="text-2xl font-black text-white mb-2">$BOARD TOKEN</div>
               <div className="text-white/50 text-sm max-w-md mx-auto mb-4">
-                Earn daily USDC revenue by holding $BOARD. Advertising fees flow from the billboard to
-                holders every epoch — fully on-chain and transparent.
+                Recognized ad revenue flows into the distribution pool each epoch. Eligible $BOARD holders
+                can claim their snapshot-based share — fully on-chain and transparent.
               </div>
-              <div className="flex items-center justify-center gap-3">
+              <div className="grid gap-3 sm:flex sm:items-center sm:justify-center">
                 <Link
                   href="/claim"
-                  className="inline-flex items-center gap-1.5 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2 rounded-lg text-sm transition-colors"
+                  className="min-h-11 inline-flex items-center justify-center gap-1.5 bg-green-400 hover:bg-green-300 text-black font-bold px-5 py-2 rounded-lg text-sm transition-colors"
                 >
                   Claim Revenue →
                 </Link>

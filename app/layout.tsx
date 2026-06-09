@@ -1,16 +1,17 @@
 import type { Metadata } from 'next'
+import '@solana/wallet-adapter-react-ui/styles.css'
 import './globals.css'
 import Navbar from '@/components/Navbar'
 import Footer from '@/components/Footer'
 import WalletProvider from '@/components/WalletProvider'
 
 export const metadata: Metadata = {
-  title: 'BillionBoard — 1 Billion Pixel Internet Billboard',
+  title: 'BillionBoard — The Internet Billboard Powered by $BOARD',
   description:
-    'Rent pixels on the worlds largest internet billboard. Powered by $BOARD on Solana.',
+    'Rent tiles on the internet billboard powered by $BOARD on Solana. 100,000 tiles. Recognized ad revenue flows into the distribution pool for eligible $BOARD holders.',
   openGraph: {
     title: 'BillionBoard',
-    description: '1,000,000,000 pixels. 100,000 tiles. $1/tile/day.',
+    description: '100,000 tiles. 1 billion $BOARD. One internet billboard.',
     type: 'website',
   },
 }
@@ -21,7 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-full bg-black text-white antialiased">
         <WalletProvider>
           <Navbar />
-          <main className="pt-14">{children}</main>
+          <main style={{ paddingTop: 'var(--nav-height)' }}>{children}</main>
           <Footer />
         </WalletProvider>
       </body>

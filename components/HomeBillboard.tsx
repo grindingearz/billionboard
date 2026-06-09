@@ -1,25 +1,43 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import Billboard from './Billboard'
 import Loupe from './Loupe'
 import type { TileInfoMap, TileInfo } from '@/lib/types'
 import { BOARD_COLUMNS, BOARD_ROWS } from '@/lib/types'
+import { trackEvent } from '@/lib/analytics'
 
 const ZOOM_LEVELS = [1, 1.5, 2, 3, 4, 6, 8] as const
 type ZoomLevel = (typeof ZOOM_LEVELS)[number]
 
-// Returns the best zoom index for navigating to a campaign of given tile span.
-// Targets the campaign filling ~55% of the viewport. Clamped to 2× – 6×.
-function bestZoomIdxForSpan(spanCols: number, spanRows: number): number {
-  const zColTarget = (0.55 * BOARD_COLUMNS) / Math.max(1, spanCols)
-  const zRowTarget = (0.55 * BOARD_ROWS) / Math.max(1, spanRows)
-  const zTarget = Math.min(zColTarget, zRowTarget)
-  const idealIdx = ZOOM_LEVELS.reduce(
-    (best, z, idx) => (Math.abs(z - zTarget) < Math.abs(ZOOM_LEVELS[best] - zTarget) ? idx : best),
-    0
+const PAD_TOP = 80
+const PAD_BOTTOM = 140
+const PAD_X = 80
+
+// Returns the best zoom index for a campaign of given tile span, using actual
+// viewport dimensions. Targets ~65% of available area. Clamped to 1× – 4×.
+function computeTargetZoomIdx(
+  spanCols: number,
+  spanRows: number,
+  containerW: number,
+  containerH: number,
+  fitW: number,
+): number {
+  if (containerW === 0 || containerH === 0 || fitW === 0) return 0
+  const aspect = BOARD_COLUMNS / BOARD_ROWS
+  const fitH = fitW / aspect
+  const availW = Math.max(50, containerW - PAD_X)
+  const availH = Math.max(50, containerH - PAD_TOP - PAD_BOTTOM)
+  const safeCols = Math.max(1, spanCols)
+  const safeRows = Math.max(1, spanRows)
+  const zMaxW = (availW * BOARD_COLUMNS) / (safeCols * fitW)
+  const zMaxH = (availH * BOARD_ROWS) / (safeRows * fitH)
+  const zTarget = 0.65 * Math.min(zMaxW, zMaxH)
+  const zClamped = Math.max(1, Math.min(zTarget, 4))
+  return ZOOM_LEVELS.reduce(
+    (best, z, idx) => (Math.abs(z - zClamped) < Math.abs(ZOOM_LEVELS[best] - zClamped) ? idx : best),
+    0,
   )
-  return Math.max(2, Math.min(idealIdx, 5)) // index 2 = 2×, index 5 = 6×
 }
 
 interface AdGroup {
@@ -105,12 +123,15 @@ function ActiveAdCard({
   )
 }
 
+type PendingScroll = { col: number; row: number }
+
 export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: HomeBillboardProps) {
   const [zoomIdx, setZoomIdx] = useState(0)
   const zoom: ZoomLevel = ZOOM_LEVELS[zoomIdx]
   const boardContainerRef = useRef<HTMLDivElement>(null)
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const initialScrollDone = useRef(false)
+  const [pendingScroll, setPendingScroll] = useState<PendingScroll | null>(null)
 
   const aspect = BOARD_COLUMNS / BOARD_ROWS
   const fitW =
@@ -157,6 +178,11 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
     })
   }, [tiles])
 
+  const jumpableAdGroups = useMemo(
+    () => adGroups.filter((g) => g.info.campaignType !== 'ADMIN_FREE'),
+    [adGroups],
+  )
+
   const creativeTileCount = useMemo(() => {
     const m = new Map<string, number>()
     for (const g of adGroups) m.set(g.key, g.tileIds.length)
@@ -177,6 +203,9 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
     return () => ro.disconnect()
   }, [])
 
+  // Fire BOARD_VIEW once on mount
+  useEffect(() => { trackEvent('BOARD_VIEW', '/') }, [])
+
   // Initial camera — only zooms to a campaign if focusCampaign is explicitly set.
   // Without it, defaults to fit-board (1×) centered — no auto-zoom to ads.
   useEffect(() => {
@@ -187,35 +216,38 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
 
     const newFitW =
       containerSize.h > 0
-        ? Math.min(containerSize.w, containerSize.h * aspect)
+        ? Math.min(containerSize.w, containerSize.h * (BOARD_COLUMNS / BOARD_ROWS))
         : containerSize.w || 800
 
-    const targetGroup = focusCampaign
-      ? adGroups.find((g) => g.key === focusCampaign)
-      : null
+    const targetGroup = focusCampaign ? adGroups.find((g) => g.key === focusCampaign) : null
 
     if (focusCampaign && targetGroup) {
-      // Focus on the specific campaign bounding box
       const spanCols = Math.max(1, targetGroup.maxCol - targetGroup.minCol + 1)
       const spanRows = Math.max(1, targetGroup.maxRow - targetGroup.minRow + 1)
-      const zoomIdxToUse = bestZoomIdxForSpan(spanCols, spanRows)
       const centerCol = (targetGroup.minCol + targetGroup.maxCol) / 2
       const centerRow = (targetGroup.minRow + targetGroup.maxRow) / 2
-      const newBoardW = newFitW * ZOOM_LEVELS[zoomIdxToUse]
-      const newBoardH = (newFitW / aspect) * ZOOM_LEVELS[zoomIdxToUse]
-      setZoomIdx(zoomIdxToUse)
-      requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(0, ((centerCol + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2)
-        el.scrollTop = Math.max(0, ((centerRow + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2)
-      })
+      const zIdx = computeTargetZoomIdx(spanCols, spanRows, containerSize.w, containerSize.h, newFitW)
+      setZoomIdx(zIdx)
+      setPendingScroll({ col: centerCol, row: centerRow })
     } else {
       // Default: full-board overview at 1× (fit), centered
       const bW = newFitW * ZOOM_LEVELS[0]
-      const bH = (newFitW / aspect) * ZOOM_LEVELS[0]
+      const bH = (newFitW / (BOARD_COLUMNS / BOARD_ROWS)) * ZOOM_LEVELS[0]
       el.scrollLeft = Math.max(0, (bW - containerSize.w) / 2)
       el.scrollTop = Math.max(0, (bH - containerSize.h) / 2)
     }
-  }, [containerSize.w, containerSize.h, adGroups, aspect, focusCampaign])
+  }, [containerSize.w, containerSize.h, adGroups, focusCampaign])
+
+  // Commit pending scroll after React has painted the new zoom level
+  useLayoutEffect(() => {
+    if (!pendingScroll) return
+    const el = boardContainerRef.current
+    if (!el || containerSize.w === 0) return
+    const effectiveCenterY = PAD_TOP + Math.max(0, containerSize.h - PAD_TOP - PAD_BOTTOM) / 2
+    el.scrollLeft = Math.max(0, ((pendingScroll.col + 0.5) / BOARD_COLUMNS) * boardW - containerSize.w / 2)
+    el.scrollTop = Math.max(0, ((pendingScroll.row + 0.5) / BOARD_ROWS) * boardH - effectiveCenterY)
+    setPendingScroll(null)
+  }, [pendingScroll, boardW, boardH, containerSize.w, containerSize.h])
 
   const zoomIn = useCallback(() => setZoomIdx((i) => Math.min(i + 1, ZOOM_LEVELS.length - 1)), [])
   const zoomOut = useCallback(() => setZoomIdx((i) => Math.max(i - 1, 0)), [])
@@ -233,54 +265,45 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
   }, [zoomIn, zoomOut])
 
   const scrollToPosition = useCallback(
-    (col: number, row: number, targetZoomIdx: number) => {
-      const el = boardContainerRef.current
-      if (!el || containerSize.w === 0) return
-      const newZoomIdx = Math.min(targetZoomIdx, ZOOM_LEVELS.length - 1)
-      const newZoom = ZOOM_LEVELS[newZoomIdx]
-      const newFitW =
-        containerSize.h > 0
-          ? Math.min(containerSize.w, containerSize.h * aspect)
-          : containerSize.w || 800
-      const newBoardW = newFitW * newZoom
-      const newBoardH = (newFitW / aspect) * newZoom
-      setZoomIdx(newZoomIdx)
-      requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(0, ((col + 0.5) / BOARD_COLUMNS) * newBoardW - containerSize.w / 2)
-        el.scrollTop = Math.max(0, ((row + 0.5) / BOARD_ROWS) * newBoardH - containerSize.h / 2)
-      })
+    (col: number, row: number, newZoomIdx: number) => {
+      setZoomIdx(Math.min(newZoomIdx, ZOOM_LEVELS.length - 1))
+      setPendingScroll({ col, row })
     },
-    [containerSize, aspect]
+    [],
   )
 
   const goToAd = useCallback(
     (idx: number) => {
-      const g = adGroups[idx]
+      const g = jumpableAdGroups[idx]
       if (!g) return
       const centerCol = (g.minCol + g.maxCol) / 2
       const centerRow = (g.minRow + g.maxRow) / 2
       const spanCols = Math.max(1, g.maxCol - g.minCol + 1)
       const spanRows = Math.max(1, g.maxRow - g.minRow + 1)
-      scrollToPosition(centerCol, centerRow, bestZoomIdxForSpan(spanCols, spanRows))
+      const newFitW =
+        containerSize.h > 0
+          ? Math.min(containerSize.w, containerSize.h * (BOARD_COLUMNS / BOARD_ROWS))
+          : containerSize.w || 800
+      scrollToPosition(centerCol, centerRow, computeTargetZoomIdx(spanCols, spanRows, containerSize.w, containerSize.h, newFitW))
       setCurrentAdIdx(idx)
     },
-    [adGroups, scrollToPosition]
+    [jumpableAdGroups, scrollToPosition, containerSize],
   )
 
   const jumpToAds = useCallback(() => {
-    if (adGroups.length === 0) return
+    if (jumpableAdGroups.length === 0) return
     goToAd(0)
-  }, [adGroups.length, goToAd])
+  }, [jumpableAdGroups.length, goToAd])
 
   const nextAd = useCallback(() => {
-    if (adGroups.length === 0) return
-    goToAd((currentAdIdx + 1) % adGroups.length)
-  }, [currentAdIdx, adGroups.length, goToAd])
+    if (jumpableAdGroups.length === 0) return
+    goToAd((currentAdIdx + 1) % jumpableAdGroups.length)
+  }, [currentAdIdx, jumpableAdGroups.length, goToAd])
 
   const prevAd = useCallback(() => {
-    if (adGroups.length === 0) return
-    goToAd((currentAdIdx - 1 + adGroups.length) % adGroups.length)
-  }, [currentAdIdx, adGroups.length, goToAd])
+    if (jumpableAdGroups.length === 0) return
+    goToAd((currentAdIdx - 1 + jumpableAdGroups.length) % jumpableAdGroups.length)
+  }, [currentAdIdx, jumpableAdGroups.length, goToAd])
 
   const fitBoard = useCallback(() => {
     setZoomIdx(0)
@@ -342,7 +365,9 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
     !loupeEnabled &&
     hoverTileInfo?.status === 'ACTIVE' &&
     !!hoverTileInfo?.destUrl &&
-    loupeCursor !== null
+    loupeCursor !== null &&
+    typeof window !== 'undefined' &&
+    window.matchMedia('(hover: hover) and (pointer: fine)').matches
 
   const hoverTileCount = hoverTileInfo?.creativeId
     ? (creativeTileCount.get(hoverTileInfo.creativeId) ?? 1)
@@ -372,7 +397,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
   return (
     <div className="relative w-full h-full bg-black">
       {/* Board scroll container */}
-      <div ref={boardContainerRef} className="absolute inset-0 overflow-auto">
+      <div ref={boardContainerRef} className="absolute inset-0 overflow-auto overscroll-contain">
         <div
           className="flex items-center justify-center"
           style={{ minWidth: '100%', minHeight: '100%' }}
@@ -429,10 +454,10 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
       )}
 
       {/* Status legend — collapsible pill, top right */}
-      <div ref={legendRef} className="absolute top-3 right-3 z-20">
+      <div ref={legendRef} className="absolute top-2 right-2 sm:top-3 sm:right-3 z-20">
         <button
           onClick={() => setLegendOpen((v) => !v)}
-          className="flex items-center gap-1.5 bg-black/80 border border-white/15 rounded-full px-3 py-1.5 text-[11px] text-white/50 hover:text-white/80 hover:border-white/30 transition-colors"
+          className="min-h-10 flex items-center gap-1.5 bg-black/80 border border-white/15 rounded-full px-3 py-1.5 text-[11px] text-white/50 hover:text-white/80 hover:border-white/30 transition-colors"
           title="Tile status legend"
         >
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="shrink-0">
@@ -475,33 +500,33 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
       </div>
 
       {/* Controls — bottom left */}
-      <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1.5 items-start">
-        {/* Ad navigation — only shown when ads exist, never auto-triggers */}
-        {adGroups.length > 0 && (
-          <div className="flex items-center gap-1 bg-black/80 border border-green-400/20 rounded-lg px-2 py-1.5 text-xs">
+      <div className="absolute bottom-2 left-2 right-2 z-20 flex flex-col gap-1.5 items-start sm:bottom-3 sm:left-3 sm:right-auto">
+        {/* Ad navigation — only shown when jumpable ads exist, never auto-triggers */}
+        {jumpableAdGroups.length > 0 && (
+          <div className="max-w-full flex items-center gap-1 bg-black/80 border border-green-400/20 rounded-lg px-2 py-1.5 text-xs overflow-x-auto scrollbar-none">
             <button
               onClick={jumpToAds}
-              className="text-green-400 hover:text-green-300 transition-colors font-medium px-0.5"
+              className="min-h-8 shrink-0 text-green-400 hover:text-green-300 transition-colors font-medium px-1"
               title="Jump to first ad"
             >
               Jump to Ads
             </button>
-            {adGroups.length > 1 && (
+            {jumpableAdGroups.length > 1 && (
               <>
                 <span className="text-white/15 mx-1">·</span>
                 <button
                   onClick={prevAd}
-                  className="w-5 h-5 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
+                  className="w-8 h-8 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
                   title="Previous ad"
                 >
                   ‹
                 </button>
                 <span className="text-white/40 text-[11px] tabular-nums w-8 text-center select-none">
-                  {currentAdIdx + 1}/{adGroups.length}
+                  {currentAdIdx + 1}/{jumpableAdGroups.length}
                 </span>
                 <button
                   onClick={nextAd}
-                  className="w-5 h-5 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
+                  className="w-8 h-8 flex items-center justify-center text-white/50 hover:text-white transition-colors text-base leading-none"
                   title="Next ad"
                 >
                   ›
@@ -512,11 +537,11 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
         )}
 
         {/* Zoom · Fit · Loupe */}
-        <div className="flex items-center bg-black/80 border border-white/10 rounded-lg text-xs overflow-hidden">
+        <div className="max-w-full flex items-center bg-black/80 border border-white/10 rounded-lg text-xs overflow-hidden">
           <button
             onClick={zoomOut}
             disabled={zoomIdx === 0}
-            className="w-8 h-8 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
+            className="w-10 h-10 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
             title="Zoom out"
           >
             −
@@ -527,7 +552,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
           <button
             onClick={zoomIn}
             disabled={zoomIdx === ZOOM_LEVELS.length - 1}
-            className="w-8 h-8 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
+            className="w-10 h-10 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/5 disabled:opacity-25 transition-colors font-bold text-base leading-none"
             title="Zoom in"
           >
             +
@@ -535,7 +560,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
           <div className="w-px h-4 bg-white/10 mx-0.5" />
           <button
             onClick={fitBoard}
-            className="px-2.5 h-8 text-white/40 hover:text-white/70 hover:bg-white/5 transition-colors text-[11px]"
+            className="px-3 h-10 text-white/40 hover:text-white/70 hover:bg-white/5 transition-colors text-[11px]"
             title="Fit board to screen"
           >
             Fit
@@ -543,7 +568,7 @@ export default function HomeBillboard({ tiles, tilePrice = 1, focusCampaign }: H
           <div className="w-px h-4 bg-white/10 mx-0.5" />
           <button
             onClick={() => setLoupeEnabled((v) => !v)}
-            className={`px-2.5 h-8 transition-colors text-[11px] ${
+            className={`px-3 h-10 transition-colors text-[11px] ${
               loupeEnabled
                 ? 'text-green-400 bg-green-400/10 hover:bg-green-400/15'
                 : 'text-white/40 hover:text-white/70 hover:bg-white/5'
